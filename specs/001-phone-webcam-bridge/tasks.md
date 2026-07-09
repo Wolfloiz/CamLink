@@ -36,7 +36,7 @@ do fork, Java), `installer/{linux,windows}/`.
 - [X] T001 Criar scaffold Tauri 2.x + SvelteKit (pnpm) na raiz: `src-tauri/`, `src/`, `tauri.conf.json` conforme plan.md; `pnpm tauri dev` abre janela vazia
 - [X] T002 Pinar toolchain e deps: `rust-toolchain.toml` (stable), `src-tauri/Cargo.toml` (tokio, serde, serde_json, tracing, tracing-subscriber, thiserror, keyring, uuid), rustfmt/clippy sem warnings
 - [X] T003 [P] Adicionar submodule do fork scrcpy em `scrcpy/` (branch `camlink` sobre a tag estável mais recente ≥ 4.0) + doc de build do jar em `scrcpy/README.camlink.md`
-- [ ] T004 [P] CI em `.github/workflows/ci.yml`: fmt --check, clippy -D warnings, cargo test em `ubuntu-latest` e `windows-latest` (Princípio IV)
+- [X] T004 [P] CI em `.github/workflows/ci.yml`: fmt --check, clippy -D warnings, cargo test em `ubuntu-latest` e `windows-latest` (Princípio IV)
 - [ ] T005 [P] `LICENSE` GPL-3.0 (FR-025) + `README.md` esqueleto com visão do produto
 - [ ] T006 Stubs de módulos em `src-tauri/src/`: `device_manager.rs`, `stream_manager.rs`, `camera_controller.rs`, `rtsp_manager.rs`, `raw_manager.rs`, `secrets.rs`, `error.rs`, `config.rs`, `model.rs`, `virtualcam/{mod,v4l2,akvcam}.rs`; registrar em `lib.rs`; init do `tracing` em `main.rs`
 - [ ] T007 [P] Configurar `tauri.conf.json`: bundle id, targets (.deb, AppImage, NSIS/MSI), permissões IPC mínimas
