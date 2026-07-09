@@ -1,0 +1,4 @@
+[submodule "scrcpy"]
+	path = scrcpy
+	url = https://github.com/Wolfloiz/scrcpy.git
+	branch = camlink
