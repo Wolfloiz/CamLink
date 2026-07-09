@@ -39,7 +39,7 @@ do fork, Java), `installer/{linux,windows}/`.
 - [X] T004 [P] CI em `.github/workflows/ci.yml`: fmt --check, clippy -D warnings, cargo test em `ubuntu-latest` e `windows-latest` (Princípio IV)
 - [X] T005 [P] `LICENSE` GPL-3.0 (FR-025) + `README.md` esqueleto com visão do produto
 - [ ] T006 Stubs de módulos em `src-tauri/src/`: `device_manager.rs`, `stream_manager.rs`, `camera_controller.rs`, `rtsp_manager.rs`, `raw_manager.rs`, `secrets.rs`, `error.rs`, `config.rs`, `model.rs`, `virtualcam/{mod,v4l2,akvcam}.rs`; registrar em `lib.rs`; init do `tracing` em `main.rs`
-- [ ] T007 [P] Configurar `tauri.conf.json`: bundle id, targets (.deb, AppImage, NSIS/MSI), permissões IPC mínimas
+- [X] T007 [P] Configurar `tauri.conf.json`: bundle id, targets (.deb, AppImage, NSIS/MSI), permissões IPC mínimas
 
 ---
 
