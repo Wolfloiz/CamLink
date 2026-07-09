@@ -51,7 +51,7 @@ do fork, Java), `installer/{linux,windows}/`.
 
 ### Tests (escrever primeiro, ver FALHAR)
 
-- [ ] T008 [P] Testes de serialização/roundtrip dos tipos de domínio e transições de estado de `StreamSession` (Idle→Starting→Streaming→SourceLost→Reconnecting…, conforme data-model.md) em `src-tauri/tests/model_test.rs`
+- [X] T008 [P] Testes de serialização/roundtrip dos tipos de domínio e transições de estado de `StreamSession` (Idle→Starting→Streaming→SourceLost→Reconnecting…, conforme data-model.md) em `src-tauri/tests/model_test.rs`
 - [ ] T009 [P] Testes de persistência de `AppConfig` (TOML, sem credenciais no arquivo — FR-018a) em `src-tauri/tests/config_test.rs`
 - [ ] T010 [P] Testes do trait `VirtualCameraBackend` com backend mock (create/feed/standby/destroy; invariante 1 fonte ↔ 1 device) em `src-tauri/tests/virtualcam_test.rs`
 
