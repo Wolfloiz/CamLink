@@ -237,6 +237,7 @@ dependencies = [
 name = "camlink"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "keyring",
  "serde",
  "serde_json",
@@ -245,6 +246,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
  "uuid",
