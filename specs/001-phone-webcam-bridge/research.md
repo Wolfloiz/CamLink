@@ -28,6 +28,16 @@ Nenhum NEEDS CLARIFICATION permanece.
   servidor devem casar de versão). Mudanças isoladas em pacote `camlink/` + hooks
   mínimos; avaliar PR upstream. Spike A prova `set_zoom` em runtime antes de
   qualquer investimento nas fases 4–5.
+- **Resultado do Spike A (2026-07-09)**: ✅ APROVADO em Samsung Galaxy S20 FE
+  (Android 13). `hello`/`set_zoom`/`OUT_OF_RANGE`/`BAD_REQUEST` conforme o
+  contrato; zoom 3× visível no stream headless sem reinício de sessão.
+  Detalhes e roteiro em `scrcpy/README.camlink.md`. **Quirks Samsung** que a
+  Phase 3 (T024) deve absorver: (a) hooks da libstagefright One UI copiam a
+  cmdline do processo p/ buffer fixo ao configurar encoder → argv do servidor
+  deve permanecer CURTO (~130 chars ok, ~230+ crasha com stack smash);
+  (b) `adaptivebrightnessgo` (prioridade 999) evicta o cliente de câmera UID
+  shell em ~2 s → desativar brilho adaptativo durante o stream ou emitir
+  diagnóstico acionável (FR-010).
 
 ## R2. Modos inteligentes: Camera2 direto, sem SCENE_MODE e sem Extensions
 

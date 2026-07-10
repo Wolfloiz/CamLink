@@ -64,7 +64,7 @@ do fork, Java), `installer/{linux,windows}/`.
 
 ### Spikes de risco (gates de arquitetura — critérios em research.md R1/R4)
 
-- [ ] T015 **Spike A** (gateia US2/US3/US5): buildar jar stock do submodule e validar via `SCRCPY_SERVER_PATH`; adicionar thread mínima `CamLinkControlServer` escutando `localabstract:camlink`; implementar `set_zoom` real e comprovar zoom mudando no stream headless (`--no-playback`) via `adb forward` — documentar hooks em `scrcpy/README.camlink.md`. **Critério de abortar**: sessão inacessível → pivotar para pipeline própria (APK) e replanejar
+- [X] T015 **Spike A** (gateia US2/US3/US5): buildar jar stock do submodule e validar via `SCRCPY_SERVER_PATH`; adicionar thread mínima `CamLinkControlServer` escutando `localabstract:camlink`; implementar `set_zoom` real e comprovar zoom mudando no stream headless (`--no-playback`) via `adb forward` — documentar hooks em `scrcpy/README.camlink.md`. **Critério de abortar**: sessão inacessível → pivotar para pipeline própria (APK) e replanejar
 - [ ] T016 **Spike B** (gateia US1 no Windows): instalar akvirtualcamera, empurrar frames de teste via FFI em `src-tauri/examples/win_vcam_spike.rs` e validar enumeração/vídeo em OBS, Chrome, Firefox e Discord no Windows 10 e 11 — registrar resultados em research.md R4. **Critério de aceite adicional**: medir latência fim-a-fim do caminho decode→push; se exceder 70 ms (FR-004/SC-002), pausar e propor emenda à spec antes de prosseguir com a Phase 3 no Windows
 
 **Checkpoint**: tipos+trait testados; spikes aprovados → user stories podem começar
