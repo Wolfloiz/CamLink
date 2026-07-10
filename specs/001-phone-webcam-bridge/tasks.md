@@ -58,9 +58,9 @@ do fork, Java), `installer/{linux,windows}/`.
 ### Implementation
 
 - [X] T011 Implementar tipos de domínio de data-model.md em `src-tauri/src/model.rs` (AndroidDevice, DeviceCapabilities, RtspSource, VirtualCamera, StreamSession + máquina de estados, ControlState, RawCaptureJob, AppConfig)
-- [ ] T012 [P] Implementar `src-tauri/src/error.rs`: `AppError { code, msg, action_hint }` + integração `tracing` (Princípio VI)
-- [ ] T013 [P] Implementar `src-tauri/src/config.rs`: load/save TOML no dir de config da plataforma
-- [ ] T014 Implementar `src-tauri/src/virtualcam/mod.rs`: trait `VirtualCameraBackend` (create/destroy/feed_frame/set_standby) + gerador de imagem de espera (imagem estática com logo + mensagem de estado, ex.: "Aguardando dispositivo…" — FR-006); mock backend para testes
+- [X] T012 [P] Implementar `src-tauri/src/error.rs`: `AppError { code, msg, action_hint }` + integração `tracing` (Princípio VI)
+- [X] T013 [P] Implementar `src-tauri/src/config.rs`: load/save TOML no dir de config da plataforma
+- [X] T014 Implementar `src-tauri/src/virtualcam/mod.rs`: trait `VirtualCameraBackend` (create/destroy/feed_frame/set_standby) + gerador de imagem de espera (imagem estática com logo + mensagem de estado, ex.: "Aguardando dispositivo…" — FR-006); mock backend para testes
 
 ### Spikes de risco (gates de arquitetura — critérios em research.md R1/R4)
 
