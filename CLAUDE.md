@@ -10,8 +10,9 @@ Discord). GPL-3.0.
 - **Tauri 2.x + SvelteKit** — GUI; bundling .deb/AppImage/NSIS/MSI
 - **Java 17** — somente no fork do scrcpy-server (submodule `scrcpy/`, branch
   `camlink`; roda no Android)
-- Runtime: adb, scrcpy ≥ 4.0, ffmpeg, v4l2loopback ≥ 0.13 (Linux),
-  akvirtualcamera (Windows)
+- Runtime: adb, scrcpy ≥ 4.0, ffmpeg, v4l2loopback ≥ 0.13 (Linux), filtro
+  DirectShow próprio via `windows-rs` (Windows — akvirtualcamera reprovado no
+  Spike B, ver research.md R4)
 - Crates-chave: tokio, serde, tracing, keyring, thiserror
 
 ## Regras do projeto (constituição `.specify/memory/constitution.md`)

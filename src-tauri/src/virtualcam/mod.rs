@@ -3,7 +3,7 @@
 //! platform-specific (Princípio IV); invariante: 1 fonte ↔ 1 device.
 
 #[cfg(target_os = "windows")]
-pub mod akvcam;
+pub mod dshow;
 #[cfg(target_os = "linux")]
 pub mod v4l2;
 

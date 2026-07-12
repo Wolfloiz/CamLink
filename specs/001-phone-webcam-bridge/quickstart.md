@@ -13,8 +13,9 @@ cargo fmt --check && cargo clippy -- -D warnings && cargo test   # em src-tauri/
 - **Linux**: Ubuntu 22.04+/Arch; `adb`, `scrcpy ≥ 4.0`, `ffmpeg`,
   `v4l2loopback-dkms (≥ 0.13)`, `v4l-utils` (o `installer/linux/install.sh`
   instala tudo, incluindo policy polkit e udev rules).
-- **Windows 10/11**: instalador NSIS/MSI do CamLink (inclui adb, scrcpy, ffmpeg
-  e o driver akvirtualcamera).
+- **Windows 10/11**: instalador NSIS/MSI do CamLink (inclui adb, scrcpy,
+  ffmpeg e registra o filtro DirectShow próprio do CamLink — sem driver de
+  terceiros).
 - **Celular**: Android 12+, depuração USB habilitada, cabo USB.
 - **Consumidores para teste**: OBS Studio; Chrome/Firefox (https://webrtc.github.io/samples/src/content/devices/input-output/); Discord; Linux: `cheese`/`ffplay`.
 - Dev: `rustup` (stable), `cargo tauri`, `pnpm`; fork: JDK 17 + Android SDK

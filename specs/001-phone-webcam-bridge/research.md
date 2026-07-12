@@ -72,27 +72,152 @@ Nenhum NEEDS CLARIFICATION permanece.
   Secure Boot bloqueando módulo não assinado → detectar e guiar o usuário;
   Firefox pode exigir `v4l2compat.so` via `LD_PRELOAD` — o app oferece launcher.
 
-## R4. Câmera virtual Windows: akvirtualcamera (DirectShow) via FFI
+## R4. Câmera virtual Windows: filtro DirectShow próprio (substitui akvirtualcamera)
 
-- **Decision**: `akvirtualcamera` (webcamoid, GPL-3.0, C++/C API) como backend
-  Windows do trait `VirtualCameraBackend`: o instalador registra o driver
-  DirectShow; o Rust cria a câmera e empurra frames RGB/NV12 via a API IPC.
-  Pipeline Android no Windows: `scrcpy --record=-` (H.264 em stdout) → `ffmpeg`
-  decodifica para rawvideo em pipe → Rust → akvirtualcamera. RTSP idem (ffmpeg →
-  rawvideo → push).
-- **Rationale**: scrcpy não tem sink de câmera virtual no Windows (o `--v4l2-sink`
-  é Linux-only) e ffmpeg não tem muxer de câmera virtual no Windows — é
-  necessária uma camada IPC de qualquer forma. akvirtualcamera é a opção madura,
-  GPL-compatível, com API C chamável via FFI e suportada pelo Webcamoid.
-- **Alternatives considered**: `MFCreateVirtualCamera` (Media Foundation, só
-  Win11 22H2+, exclui Win10 — pode virar backend adicional futuro); OBS Virtual
-  Camera DLL (acoplada ao OBS); softcam (menos mantida); driver próprio
-  (esforço/assinatura de driver desproporcionais).
-- **Risco/mitigação**: apps que enumeram apenas câmeras Media Foundation podem
-  não ver fontes DirectShow → **Spike B** valida OBS, Chrome, Firefox e Discord
-  no Windows 10 e 11 antes das fases dependentes; latência extra do
-  decode→push é orçada dentro dos 70 ms (medir no spike; H.264 decode local
-  ≈ 5–15 ms).
+- **Spike B — resultado (2026-07-10)**: `akvirtualcamera` **reprovado**.
+  Sequência de achados, todos verificados nesta máquina (Windows 11, build
+  ≥ 22000):
+  1. `win_vcam_spike.rs` falhava em `GetProcAddress("vcam_system_api")` —
+     símbolo ausente na release 9.4.0 instalada (adicionado só a partir da
+     9.4.1 do upstream, confirmado comparando `capi.h` das duas tags no
+     GitHub). Corrigido atualizando o driver para 9.4.1.
+  2. Com o driver atualizado, o spike roda e empurra frames sem nenhum erro
+     de API (`vcam_update`/`vcam_stream_send` sempre retornam 0), mas
+     `AkVCamManager system-api` mostra que em Windows 11 o driver
+     **auto-seleciona o backend Media Foundation** (não DirectShow, ao
+     contrário do que este documento assumia originalmente).
+  3. O device nunca aparece em `Get-PnpDevice -Class Camera` (nem
+     `AkVCamManager -p devices` depois que o processo termina) — ou seja, o
+     registro real no SO falha, mesmo com a API reportando sucesso. Não
+     aparece nem no Chrome/Meet (MF) nem no OBS (DirectShow) nem no `ffmpeg
+     -f dshow`.
+  4. Isso bate com bugs abertos/recém-fechados no upstream
+     ([webcamoid/akvirtualcamera#95](https://github.com/webcamoid/akvirtualcamera/issues/95),
+     [#96](https://github.com/webcamoid/akvirtualcamera/issues/96)): o
+     próprio mantenedor admite que a detecção de câmeras Media Foundation
+     por outros programas é intermitente ("not sure why").
+  5. **Controle**: a OBS Virtual Camera (embutida no OBS, filtro DirectShow
+     próprio em `plugins/win-dshow/virtualcam-module/`, não relacionado ao
+     akvirtualcamera) funciona normalmente no Chrome/Meet na mesma máquina —
+     confirma que DirectShow continua sendo enumerado corretamente pelos
+     consumidores; o problema é específico do codepath MF do
+     akvirtualcamera, não do ambiente.
+- **Decision**: abandonar `akvirtualcamera`; implementar um filtro DirectShow
+  **próprio** (push-source, Rust via `windows-rs` — feature
+  `Win32_Media_DirectShow` já expõe as interfaces COM necessárias, sem
+  precisar handwritear vtables) como backend Windows do trait
+  `VirtualCameraBackend`. Pipeline inalterado: `scrcpy --record=-` → `ffmpeg`
+  decodifica para rawvideo em pipe → Rust → filtro DirectShow. RTSP idem.
+- **Rationale**: scrcpy não tem sink de câmera virtual no Windows e ffmpeg não
+  tem muxer de câmera virtual no Windows — necessária uma camada IPC de
+  qualquer forma. DirectShow é a API madura (décadas de uso, bem documentada,
+  `windows-rs` já tem os bindings) e comprovadamente funcional nesta stack
+  (via o controle com a OBS Virtual Camera); implementação própria elimina a
+  dependência de um driver de terceiros com bugs de registro não resolvidos.
+- **Alternatives considered**: `MFCreateVirtualCamera` — reavaliado com a doc
+  oficial da Microsoft: exige implementar um `IMFMediaSource`/`IMFMediaStream`
+  COM completo e registrado por CLSID (não há método de push de sample direto
+  na interface `IMFVirtualCamera`), e requer Windows Build 22000+ (Win11
+  puro, exclui Win10) — esforço desproporcional confirmado, mantém-se
+  rejeitado. Código da OBS Virtual Camera (`virtualcam-filter.cpp`): é
+  GPL-2.0 sem cláusula "or later" nos cabeçalhos — **não pode ser copiado**
+  para este projeto (GPL-3.0); usamos só a mesma arquitetura (filtro
+  DirectShow), implementação própria via BaseClasses/`windows-rs`. softcam
+  (menos mantida) e driver assinado próprio (custo de assinatura
+  desproporcional) seguem descartados.
+- **Risco/mitigação**: implementação de filtro COM DirectShow em Rust é
+  território pouco trilhado (poucas referências prontas) → **Spike C**
+  (T074) valida um filtro mínimo (registro + 1 formato + push de frames)
+  antes de consolidar `virtualcam/dshow.rs` (T023 revisado); latência extra
+  do decode→push segue orçada dentro dos 70 ms (H.264 decode local
+  ≈ 5–15 ms, sem mudança nessa parte do pipeline).
+- **Spike C — resultado (2026-07-10)**: **APROVADO**. Filtro push-source
+  mínimo (`src-tauri/examples/win_dshow_spike.rs`, RGB24 640×480@30,
+  `windows-rs` puro) registrado em `HKEY_CURRENT_USER\Software\Classes` (sem
+  elevação) e validado end-to-end via Chrome real (headless, CDP,
+  `getUserMedia`+`enumerateDevices`): device aparece, stream abre sem erro,
+  frames com conteúdo real e não-estático (luminância não-nula, pixels
+  mudando entre capturas). Também validado via cliente DirectShow genérico
+  próprio (`win_dshow_connect_probe.rs`: `IGraphBuilder::Connect` → Null
+  Renderer → `IMediaControl::Run` → `GetState` = Running → `Stop`, sem erros).
+  Dois bugs reais encontrados e corrigidos durante o processo (relevantes
+  para T023, evitar reintroduzir):
+  1. **`IPin::QueryPinInfo.pFilter` e `IBaseFilter::QueryFilterInfo.pGraph`
+     não podem ser `None`** — o contrato DirectShow exige referência contada
+     válida ao filtro/grafo dono; um pino sem filtro dono ou um filtro que
+     nunca "lembra" ter sido unido ao grafo (`JoinFilterGraph` como no-op)
+     derruba o processo hospedeiro (Chrome/ffmpeg) quando o Filter Graph
+     Manager desreferencia sem checar null — sem esse contrato, nem chegava
+     a chamar `IPin::Connect`. Corrigido guardando auto-referências
+     (`self_filter`/`self_pin`, AddRef só na entrega; `graph` como ponteiro
+     bruto sem AddRef, por convenção, para evitar ciclo).
+  2. **`IPin::ReceiveConnection` com `pConnector = None` é rejeitado
+     (`E_POINTER`)** por vários consumidores (ex.: Null Renderer) — a maioria
+     dos exemplos/tutoriais trata esse parâmetro como opcional, mas na
+     prática é preciso passar uma referência real a si mesmo.
+  3. **`AMPROPERTY_PIN_CATEGORY` (valor `0`, propriedade de
+     `AMPROPSETID_Pin`) ≠ `KSPROPERTY_PIN_CATEGORY` (valor `11`, enum
+     diferente)** — bug sutil de nome parecido: o filtro respondia à
+     propriedade errada em `IKsPropertySet::Get`. Câmeras físicas e a OBS
+     Virtual Camera também "falhavam" contra a propriedade errada nos testes
+     manuais, mascarando o bug (parecia que só o nosso filtro respondia).
+     Esse é exatamente o property ID que `VideoCaptureDeviceWin::Init()` do
+     Chromium usa para achar o pino de captura (`media/capture/video/win/
+     video_capture_device_win.cc`, confirmado lendo o código-fonte do
+     Chromium) — sem a correção, `Init()` falhava silenciosamente
+     ("Launching device has failed", sem detalhe do motivo).
+  **Validação manual em OBS (2026-07-12)**: revelou 2 bugs adicionais,
+  ausentes do teste automatizado via Chrome porque o Chromium não bate nesses
+  caminhos de código — só apareceram com um consumidor DirectShow "real"
+  (OBS/`libdshowcapture`). Ambos corrigidos, código-fonte da OBS
+  (`obsproject/libdshowcapture`) lido diretamente do GitHub para confirmar o
+  contrato exato esperado:
+  4. **Trava permanente da OBS ao adicionar a fonte (precisava matar pelo
+     Gerenciador de Tarefas)** — causa raiz: `IEnumMediaTypes::Skip` era um
+     no-op (só logava e retornava `Ok(())`, sem marcar o enumerador como
+     esgotado). A OBS sonda quantos formatos um pino oferece com o idioma
+     "criar enumerador novo → `Skip(i)` → `Next(1, ...)`, incrementando `i`"
+     — com `Skip` não fazendo nada, `Next` sempre reportava sucesso não
+     importa o `i`, então a sondagem nunca via `Next` falhar e girava para
+     sempre incrementando `i" (chegou a >80000 no log antes do usuário matar o
+     processo), 100% de CPU numa thread da OBS sem nunca devolver o controle.
+     Diagnosticado via logging próprio em arquivo (`dbg_log`, grava em
+     `%TEMP%\camlink_dshow_debug.log`, técnica necessária porque a OBS não
+     tem console visível) mostrando o padrão `Skip(0), Skip(1), Skip(2), ...`
+     intercalado com criações de enumerador novo, nunca terminando. Corrigido
+     implementando `Skip` de verdade: com um único formato disponível,
+     qualquer `Skip(n>=1)` esgota o enumerador (marca `done=true`) e retorna
+     `S_FALSE` se `n` excedia o que sobrava — aí `Next` correndo depois
+     reporta corretamente "acabou" e a sondagem da OBS termina. (Duas pistas
+     falsas investigadas e descartadas antes de achar isso: teoria de
+     apartment/marshaling cross-thread via Global Interface Table — revelou
+     que `IMemInputPin`/`IMemAllocator` não têm proxy/stub COM registrado no
+     Windows, são interfaces "fast path" propositalmente não-marshaláveis, uso
+     de ponteiro cru cross-thread é o padrão correto, não um bug; e teoria de
+     `join()` bloqueante no `Stop()` — removida por ser mais correta de
+     qualquer forma, mas não era a causa da trava.)
+  5. **Tela preta na OBS / preview travado no último frame de outra fonte**
+     (depois do bug #4 corrigido — a OBS parava de travar, conectava,
+     `IMemInputPin::Receive` retornava `S_OK`, mas nada aparecia) — causa
+     raiz: nunca chamávamos `IMediaSample::SetTime`. Lendo
+     `HDevice::Receive` em `libdshowcapture/source/device.cpp`: o frame só é
+     encaminhado pro pipeline de vídeo real da OBS
+     (`SendToCallback`/`videoConfig.callback`) se `sample->GetTime(...)`
+     tiver sucesso (`hasTime`); sem timestamp, `Receive()` aceita a amostra
+     no nível do protocolo COM (retorna `S_OK`, daí não travar mais) mas o
+     conteúdo é descartado silenciosamente antes de chegar à renderização.
+     Corrigido setando `start`/`end` em unidades de 100ns (`REFERENCE_TIME`)
+     por frame, casado com o `AvgTimePerFrame` já declarado no media type.
+  **Validado (2026-07-12)**: OBS (padrão de cores real, sem travar, sem tela
+  preta) e Google Meet via Chrome real (não-headless). Diferença de
+  espelhamento horizontal observada entre Meet e OBS é comportamento
+  esperado do lado de cada app (Meet espelha o preview local pra parecer
+  natural; OBS mostra o frame cru) — não é bug do filtro.
+  **Pendente**: validação manual em Firefox e Discord (não bloqueante — o
+  mesmo contrato COM já provado em dois consumidores reais distintos).
+  Antes de consolidar T023: remover a instrumentação `dbg_log`/arquivo de
+  debug do spike (comentário `// Remover antes de consolidar T023` já no
+  código-fonte).
 
 ## R5. Pipeline RTSP: ffmpeg low-delay
 

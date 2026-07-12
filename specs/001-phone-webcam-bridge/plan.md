@@ -22,7 +22,8 @@ ISO, WB, EIS, torch), modos inteligentes (Auto/Night/Sport/Pro) e captura RAW
 (DNG) — tudo sobre a `CameraCaptureSession` que o próprio servidor possui. O vídeo
 flui pela pipeline padrão do scrcpy; no Linux via `--v4l2-sink` direto para
 v4l2loopback, no Windows via stream H.264 decodificado e empurrado para uma câmera
-virtual DirectShow (akvirtualcamera). Fontes RTSP usam pipeline ffmpeg low-delay.
+virtual DirectShow própria (filtro Rust/`windows-rs`, ver research.md R4).
+Fontes RTSP usam pipeline ffmpeg low-delay.
 App desktop em Tauri 2.x (backend Rust) com frontend Svelte.
 
 ## Technical Context
@@ -38,7 +39,9 @@ no Android, fora do alcance do Rust); TypeScript/Svelte no frontend Tauri.
   (submodule, branch `camlink` sobre a tag do cliente)
 - adb (android-tools) — detecção, túnel `adb forward`
 - ffmpeg — pipeline RTSP low-delay e decode no caminho Windows
-- v4l2loopback ≥ 0.13 (Linux) / akvirtualcamera (Windows, GPL-3.0, FFI C)
+- v4l2loopback ≥ 0.13 (Linux) / filtro DirectShow próprio via `windows-rs`
+  (Windows — `Win32_Media_DirectShow`; substitui akvirtualcamera, reprovado
+  no Spike B, ver research.md R4)
 - Crates: `serde`/`serde_json`, `tokio` (subprocess + sockets), `tracing`,
   `keyring` (cofre de segredos: Secret Service/Credential Manager), `thiserror`
 
@@ -121,7 +124,7 @@ src-tauri/                      # Backend Rust (crate principal)
 │   └── virtualcam/
 │       ├── mod.rs              # trait VirtualCameraBackend (create/destroy/feed)
 │       ├── v4l2.rs             # Linux: v4l2loopback-ctl + pkexec/polkit
-│       └── akvcam.rs           # Windows: akvirtualcamera via FFI + frame push
+│       └── dshow.rs            # Windows: filtro DirectShow próprio + frame push
 ├── tests/                      # integração: fakes de adb/scrcpy, contratos JSON
 ├── Cargo.toml
 └── tauri.conf.json
@@ -135,7 +138,7 @@ scrcpy/                         # Submodule: fork scrcpy, branch camlink sobre v
     └── RawCapture.java             # ImageReader RAW_SENSOR + DngCreator
 installer/
 ├── linux/ (install.sh, polkit policy, udev rules, modules-load.d, PKGBUILD)
-└── windows/ (config NSIS/MSI, instalação do driver akvirtualcamera)
+└── windows/ (config NSIS/MSI, registro do filtro DirectShow próprio)
 ```
 
 **Structure Decision**: app desktop Tauri (opção desktop-app) com backend Rust
@@ -151,8 +154,9 @@ Ordem herdada do plano legado, com Windows integrado (não mais "Fase 10"):
 |---|---|---|---|
 | 0 | Scaffold Tauri + stubs + CI (fmt/clippy/test, Linux+Windows) | — | ambas |
 | 0.5 | **Spike A**: fork scrcpy-server — `set_zoom` runtime headless (critério de abortar: pivotar p/ pipeline própria e replanejar) | — | Android |
-| 0.6 | **Spike B**: câmera virtual Windows — frame de teste visível no OBS via akvirtualcamera | — | Windows |
-| 1 | `virtualcam/` (trait + v4l2 + akvcam) | US1 | ambas |
+| 0.6 | **Spike B**: câmera virtual Windows via akvirtualcamera — **reprovado** (research.md R4) | — | Windows |
+| 0.7 | **Spike C**: câmera virtual Windows — filtro DirectShow próprio, frame de teste visível no OBS/Chrome/Firefox/Discord | — | Windows |
+| 1 | `virtualcam/` (trait + v4l2 + dshow) | US1 | ambas |
 | 2 | Detecção ADB + orientação de autorização | US1 | ambas |
 | 3 | Stream Android → câmera virtual (scrcpy stock) | US1 (MVP) | ambas |
 | 4 | Fork em produção: protocolo base + capabilities | US2 | Android |

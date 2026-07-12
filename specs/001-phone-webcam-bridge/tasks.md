@@ -65,7 +65,8 @@ do fork, Java), `installer/{linux,windows}/`.
 ### Spikes de risco (gates de arquitetura — critérios em research.md R1/R4)
 
 - [X] T015 **Spike A** (gateia US2/US3/US5): buildar jar stock do submodule e validar via `SCRCPY_SERVER_PATH`; adicionar thread mínima `CamLinkControlServer` escutando `localabstract:camlink`; implementar `set_zoom` real e comprovar zoom mudando no stream headless (`--no-playback`) via `adb forward` — documentar hooks em `scrcpy/README.camlink.md`. **Critério de abortar**: sessão inacessível → pivotar para pipeline própria (APK) e replanejar
-- [ ] T016 **Spike B** (gateia US1 no Windows): instalar akvirtualcamera, empurrar frames de teste via FFI em `src-tauri/examples/win_vcam_spike.rs` e validar enumeração/vídeo em OBS, Chrome, Firefox e Discord no Windows 10 e 11 — registrar resultados em research.md R4. **Critério de aceite adicional**: medir latência fim-a-fim do caminho decode→push; se exceder 70 ms (FR-004/SC-002), pausar e propor emenda à spec antes de prosseguir com a Phase 3 no Windows
+- [X] T016 **Spike B** (gateia US1 no Windows): instalar akvirtualcamera, empurrar frames de teste via FFI em `src-tauri/examples/win_vcam_spike.rs` e validar enumeração/vídeo em OBS, Chrome, Firefox e Discord no Windows 10 e 11 — registrar resultados em research.md R4. **Resultado: REPROVADO** (2026-07-10) — driver não registra o device no SO em Windows 11 (bug upstream do backend Media Foundation, akvirtualcamera/#95/#96); ver research.md R4 para a investigação completa. **Critério de abortar acionado**: pivotar para filtro DirectShow próprio → **T074 (Spike C)** gateia o novo T023
+- [X] T074 **Spike C** (gateia T023, substitui a função de gate do T016 para o backend Windows): implementar filtro DirectShow push-source mínimo em Rust (`windows-rs`, feature `Win32_Media_DirectShow`) em `src-tauri/examples/win_dshow_spike.rs` — registro COM (CLSID próprio, sem copiar código GPL-2.0 da OBS), 1 formato RGB24/NV12, push de frames — validar enumeração/vídeo em OBS, Chrome, Firefox e Discord no Windows 10 e 11; registrar resultados em research.md R4. **Resultado: APROVADO** (2026-07-12, revalidado após bugs adicionais encontrados em teste manual) — validado via Chrome/Meet real (headless+CDP e não-headless), OBS real (padrão de cores exibido, sem travar) e cliente DirectShow genérico próprio (`win_dshow_connect_probe.rs`). 5 bugs de contrato COM encontrados e corrigidos no total (pFilter/pGraph nulos derrubavam o processo hospedeiro; pConnector nulo rejeitado por consumidores reais; property ID errado em IKsPropertySet; `IEnumMediaTypes::Skip` no-op causava sondagem infinita e travava a OBS de vez; `IMediaSample::SetTime` nunca chamado fazia a OBS descartar todo frame silenciosamente, tela preta — ver research.md R4 para detalhes de cada um). Falta validação manual em Firefox/Discord (não bloqueante — mesmo contrato COM já provado em dois consumidores reais distintos). **Critério de aceite adicional**: medir latência fim-a-fim do caminho decode→push; se exceder 70 ms (FR-004/SC-002), pausar e propor emenda à spec — pendente, sem processo real de push de frames decodificados ainda (fica para T023). **Critério de abortar**: não acionado.
 
 **Checkpoint**: tipos+trait testados; spikes aprovados → user stories podem começar
 
@@ -90,7 +91,7 @@ do fork, Java), `installer/{linux,windows}/`.
 
 - [ ] T021 [US1] Implementar `src-tauri/src/device_manager.rs`: exec `adb devices -l`, polling 500 ms, eventos `device_connected/disconnected/unauthorized` (≤ 3 s — FR-001), gate Android 12+ (FR-002a)
 - [ ] T022 [P] [US1] Implementar `src-tauri/src/virtualcam/v4l2.rs`: add/delete via `v4l2loopback-ctl` + pkexec/polkit, `exclusive_caps`, fallback modprobe, diagnóstico Secure Boot (research R3)
-- [ ] T023 [P] [US1] Implementar `src-tauri/src/virtualcam/akvcam.rs`: FFI akvirtualcamera (criar câmera, push de frames, standby) consolidando o Spike B (research R4)
+- [ ] T023 [P] [US1] Implementar `src-tauri/src/virtualcam/dshow.rs`: filtro DirectShow próprio (registro COM, criar câmera, push de frames, standby) consolidando a Spike C (research R4; substitui o antigo `akvcam.rs`/FFI akvirtualcamera — ver T016)
 - [ ] T024 [US1] Implementar `src-tauri/src/stream_manager.rs`: subprocess scrcpy **com servidor stock** (o jar forkado só entra em T037/US2) — Linux: `--v4l2-sink` direto; Windows: `--record=-` → ffmpeg decode → `feed_frame`; lifecycle start/stop/auto-reconnect com standby (FR-005/006), captura de stderr → `AppError`
 - [ ] T025 [US1] Comandos/eventos Tauri de US1 conforme contracts/tauri-commands.md: `list_devices`, `start_stream`, `stop_stream`, `session_state`, `device_*` em `src-tauri/src/lib.rs`
 - [ ] T026 [US1] Preview 1 fps para fontes Android: leitura do device virtual (Linux: crate `v4l`; Windows: tap no pipe de decode) → evento `preview_frame` JPEG, frames descartáveis (FR-023) em `src-tauri/src/stream_manager.rs` (preview de fontes RTSP: T051)
@@ -221,7 +222,7 @@ do fork, Java), `installer/{linux,windows}/`.
 ## Phase 9: Polish & Cross-Cutting Concerns
 
 - [ ] T066 [P] Instalador Linux: `installer/linux/install.sh` (deps, policy polkit, udev rules, modules-load.d) + bundle `.deb`/AppImage + `installer/linux/PKGBUILD` (AUR), jar do fork embutido (FR-024)
-- [ ] T067 [P] Instalador Windows: NSIS/MSI via Tauri bundler com adb/scrcpy/ffmpeg/driver akvirtualcamera embutidos em `installer/windows/` (FR-024)
+- [ ] T067 [P] Instalador Windows: NSIS/MSI via Tauri bundler com adb/scrcpy/ffmpeg embutidos + registro do filtro DirectShow próprio (`regsvr32` equivalente no instalador, sem driver de terceiros) em `installer/windows/` (FR-024)
 - [ ] T068 [P] System tray + auto-connect de dispositivos lembrados (`AppConfig.auto_connect`) em `src-tauri/src/main.rs`
 - [ ] T069 Launcher Firefox com `v4l2compat.so` (LD_PRELOAD) quando necessário, em `src-tauri/src/virtualcam/v4l2.rs` (edge case da spec)
 - [ ] T070 Soak test 2 h com monitoramento de RSS/fps (SC-005) — roteiro no quickstart Cenário 7; corrigir vazamentos encontrados
@@ -236,7 +237,7 @@ do fork, Java), `installer/{linux,windows}/`.
 ### Phase Dependencies
 
 - **Phase 1 (Setup)**: sem dependências
-- **Phase 2 (Foundational)**: depende de Phase 1 — **BLOQUEIA todas as stories**; T015 (Spike A) gateia Phases 4/5/7; T016 (Spike B) gateia o lado Windows da Phase 3
+- **Phase 2 (Foundational)**: depende de Phase 1 — **BLOQUEIA todas as stories**; T015 (Spike A) gateia Phases 4/5/7; T016 (Spike B) reprovou akvirtualcamera, T074 (Spike C, filtro DirectShow próprio) aprovado em seu lugar — Phase 3/T023 liberada para o lado Windows
 - **Phase 3 (US1/MVP)**: depende de Phase 2
 - **Phase 4 (US2)**: depende de Phase 3 (stream ativo) + T015
 - **Phase 5 (US3)**: depende de Phase 4 (protocolo base)
@@ -271,7 +272,7 @@ Task: "T020 cmdline scrcpy em src-tauri/tests/scrcpy_cmd_test.rs"
 
 # Depois, implementação com paralelismo parcial:
 Task: "T022 virtualcam/v4l2.rs"   # ∥ T023 (arquivos distintos)
-Task: "T023 virtualcam/akvcam.rs"
+Task: "T023 virtualcam/dshow.rs"
 ```
 
 ---
@@ -302,6 +303,7 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
 ## Notes
 
 - Spike A tem critério de abortar explícito (T015) — replaneje ANTES de investir nas Phases 4/5/7 se falhar
+- Spike B (T016) abortou em 2026-07-10 (akvirtualcamera reprovado no Windows 11 — research.md R4); T074 (Spike C, filtro DirectShow próprio) aprovado no mesmo dia — libera T023 (implementação completa, canalizando frames reais do pipeline decode→push)
 - Golden files (`contracts/golden/`) são a fonte única de verdade do protocolo — Rust e Java testam contra os mesmos arquivos
 - Validações manuais (T029, T041, T047, T054, T061, T065, T071) são gates de checkpoint: não avançar de story com elas pendentes
 - Commit após cada task ou grupo lógico; PRs por story
