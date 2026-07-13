@@ -28,12 +28,15 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 toml = "0.8"
 dirs = "6"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service"] }
+v4l = "0.14"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
@@ -53,10 +56,18 @@ windows = { version = "0.62", features = [
     "Win32_Media_KernelStreaming",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
 ] }
 windows-core = "0.62"
 
 [[example]]
 name = "win_dshow_spike"
 crate-type = ["cdylib"]
+
+[[bin]]
+name = "fake_backend"
+path = "tests/bin/fake_backend.rs"
+test = false
+doc = false
 

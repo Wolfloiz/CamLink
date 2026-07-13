@@ -374,7 +374,9 @@ mod dshow_filter {
                 let loop_start = Instant::now();
                 unsafe {
                     let mut sample = None;
-                    dbg_log(&format!("worker_loop[{iter}]: chamando allocator.GetBuffer..."));
+                    dbg_log(&format!(
+                        "worker_loop[{iter}]: chamando allocator.GetBuffer..."
+                    ));
                     let hr = allocator.GetBuffer(&mut sample, None, None, 0);
                     dbg_log(&format!("worker_loop[{iter}]: GetBuffer -> {hr:?}"));
                     if hr.is_ok() {
@@ -399,7 +401,9 @@ mod dshow_filter {
                             let start_rt = iter as i64 * frame_duration_rt;
                             let end_rt = start_rt + frame_duration_rt;
                             let _ = sample.SetTime(Some(&start_rt), Some(&end_rt));
-                            dbg_log(&format!("worker_loop[{iter}]: chamando mem_input.Receive..."));
+                            dbg_log(&format!(
+                                "worker_loop[{iter}]: chamando mem_input.Receive..."
+                            ));
                             let recv_hr = mem_input.Receive(&sample);
                             dbg_log(&format!("worker_loop[{iter}]: Receive -> {recv_hr:?}"));
                         }
@@ -468,7 +472,9 @@ mod dshow_filter {
             }
         }
         fn Skip(&self, cmediatypes: u32) -> WinResult<()> {
-            dbg_log(&format!("SingleMediaTypeEnum::Skip cmediatypes={cmediatypes}"));
+            dbg_log(&format!(
+                "SingleMediaTypeEnum::Skip cmediatypes={cmediatypes}"
+            ));
             if cmediatypes == 0 {
                 return Ok(());
             }

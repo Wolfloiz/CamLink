@@ -68,6 +68,12 @@ Nenhum NEEDS CLARIFICATION permanece.
 - **Alternatives considered**: `modprobe` com `video_nr` fixo (colisões, requer
   reload global); virtual camera do OBS (não cobre apps fora do OBS, acopla ao
   OBS).
+- **Entrega de frames (T022)**: cada câmera virtual roda um subprocesso
+  `ffmpeg -f rawvideo -pixel_format rgba -i pipe:0 -pix_fmt yuyv422 -f v4l2
+  <device>` dedicado; `feed_frame`/`set_standby` escrevem RGBA no stdin, o
+  ffmpeg converte para YUYV422 e escreve no device. Evita bindings ioctl
+  manuais (VIDIOC_S_FMT + write) não verificáveis na máquina onde o backend
+  foi escrito (Windows); reaproveita uma dependência já pinada do projeto.
 - **Riscos tratados**: v4l2loopback < 0.13 → fallback modprobe com parâmetros;
   Secure Boot bloqueando módulo não assinado → detectar e guiar o usuário;
   Firefox pode exigir `v4l2compat.so` via `LD_PRELOAD` — o app oferece launcher.
@@ -307,3 +313,86 @@ Nenhum NEEDS CLARIFICATION permanece.
 - **Alternatives considered**: só testes manuais (viola Princípio III); emulador
   Android em CI (câmera virtual do emulador não exercita Camera2 real — valor
   baixo pelo custo; reavaliar depois).
+
+## R12. Aquisição de vídeo no Windows: bypass do cliente scrcpy, socket direto
+
+- **Contexto**: plan.md/tasks.md (T024) assumiam `--record=-` com decode via
+  ffmpeg no Windows. **Falso** — verificado em 2026-07-13 contra o scrcpy 4.0
+  real (`scrcpy --help` local + `app/src/recorder.c` upstream): o recorder
+  sempre resolve a saída via `avio_open(&ctx->pb, "file:" + filename, ...)`,
+  sem caso especial para stdout; `--record-format` só aceita containers
+  mux ados (mp4/mkv/m4a/mka/opus/aac/flac/wav), nunca H264 elementar; e o
+  muxer não liga flags de streaming (`frag_keyframe`/`empty_moov`/`movflags`
+  — busca em `recorder.c` não encontrou nenhuma). Ou seja, `--record` sempre
+  produz um arquivo seekable finalizado só no fechamento; não dá para "ler
+  enquanto grava" nem para apontar para um pipe nomeado do Windows com
+  garantia de funcionar.
+- **Decision**: no Windows, `stream_manager.rs` **não invoca o binário
+  cliente `scrcpy`** para o caminho de vídeo. Em vez disso, replica em Rust
+  só a parte de bootstrap que o cliente faz (documentada e estável em
+  `scrcpy/app/src/server.c`, tag v4.0 — mesmo submodule já fixado por R1):
+  1. `adb push <jar> /data/local/tmp/scrcpy-server.jar`;
+  2. `adb forward tcp:<porta> localabstract:scrcpy_<scid>` (tunnel forward,
+     igual ao cliente);
+  3. `adb shell CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process /
+     com.genymobile.scrcpy.Server <version> scid=... tunnel_forward=true
+     video_source=camera control=false ...` (jar **stock** em T024/US1; o
+     jar forkado com o socket de controle só entra em T037/US2 — variável de
+     ambiente já modelada como `SCRCPY_SERVER_PATH`, ver plan.md);
+  4. conectar no socket TCP encaminhado, ler o handshake (nome do device) e o
+     `codec_id` (`u32`), depois consumir o stream de *frame headers* de 12
+     bytes (config flag `u1` + key-frame flag `u1` + PTS `u62` + tamanho
+     `u32`, protocolo documentado em `scrcpy/doc/develop.md` §Protocol,
+     estável dentro da versão 4.0) seguido do payload H264 Annex-B;
+  5. alimentar um subprocesso `ffmpeg -f h264 -i pipe:0 -f rawvideo -pix_fmt
+     rgba pipe:1` (stdin/stdout, sem arquivo) e empurrar os frames RGBA
+     decodificados para `VirtualCameraBackend::feed_frame` (T023).
+  Linux **não muda**: continua usando o binário cliente `scrcpy` stock com
+  `--v4l2-sink` direto (already-validated, sem decode nosso).
+- **Rationale**: a alternativa (named pipe + `--record-format=mkv`, apostando
+  que o muxer do ffmpeg dentro do scrcpy detecta saída não-seekável e
+  transmite em vez de exigir arquivo finalizado) depende de comportamento
+  interno do libavformat não confirmado e não testável agora (nenhum Android
+  conectado nesta máquina) — risco de investigar e descobrir que não
+  funciona, sem fallback pronto. O protocolo do socket de vídeo, em
+  contraste, é documentado oficialmente pelo próprio projeto scrcpy e já
+  temos precedente de falar diretamente com o servidor forkado via socket
+  `localabstract` (R1, controle). O acoplamento extra (replicar os argumentos
+  de lançamento do servidor) é de baixo risco: já fixamos a versão do scrcpy
+  via submodule (R1), então cliente e o "mini-lançador" em Rust andam juntos
+  na mesma tag.
+- **Alternatives considered**: (a) named pipe + `--record-format=mkv`/`mp4`
+  no cliente stock — descartado por depender de comportamento não verificado
+  do avio/muxer com destino não-seekável no Windows; (b) pipeline própria
+  completa (Camera2→MediaCodec→socket custom, sem scrcpy-server) — já
+  descartada em R1 como "Plano B do spike", não revivida aqui (o problema é
+  só a entrega do H264 ao desktop, não a captura no Android).
+- **Risco/mitigação**: os argumentos de `Server.main()` fazem parte do
+  "protocolo entre cliente e servidor" que scrcpy documenta como podendo
+  mudar entre versões (`doc/develop.md`); mitigado por já estarmos pinados à
+  tag do submodule (R1) e por cobrir a montagem dos argumentos com teste de
+  unidade (T020) contra os valores conhecidos da v4.0. Isolamento
+  Linux/Windows via abstração dedicada (trait `VideoSource` ou equivalente,
+  com impls `#[cfg(target_os)]`), conforme Princípio IV da constituição —
+  não é código platform-specific solto em `stream_manager.rs`.
+- **Decisão do usuário**: confirmada em 2026-07-13 via pergunta direta
+  (opção "bypass do cliente scrcpy no Windows" vs. "named pipe + mkv/mp4 no
+  cliente stock") — usuário escolheu a primeira.
+- **Implementação (T024, 2026-07-13)**: protocolo do socket de vídeo
+  implementado em `stream_manager.rs` e verificado byte-a-byte contra
+  `scrcpy/server/.../device/DesktopConnection.java` e `Streamer.java` do
+  submodule (não apenas contra a doc em prosa): 1 byte dummy + 64 bytes de
+  nome do device (handshake) → `u32` codec id → session packet (12 bytes:
+  bit7 do byte0 = flag, bytes4..12 = width/height BE) → frame headers (12
+  bytes: bits 7/6/5 do byte0 = media/config/key, 61 bits de PTS, bytes8..12
+  = tamanho do pacote BE) + payload H264 → stdin de um subprocesso `ffmpeg
+  -f h264 -i pipe:0 -f rawvideo -pix_fmt rgba pipe:1` → stdout lido em
+  frames de tamanho fixo → `FrameSink` (`Arc<dyn Fn(&[u8]) + Send + Sync>`,
+  injetado por quem chama `start()`, para não acoplar `stream_manager.rs` a
+  um `VirtualCameraBackend` concreto). 14 testes de unidade cobrem o
+  parsing (vetores de bytes conferidos à mão, não só round-trip contra o
+  próprio encoder). **Não coberto**: conexão TCP real e decode ffmpeg
+  fim-a-fim — sem Android conectado nesta máquina; falha aqui é não-fatal
+  (a sessão continua rodando, a câmera fica em standby), mas o caminho
+  precisa de hardware real para validação completa (mesma ressalva de R4
+  sobre a ponte de memória compartilhada do DirectShow).

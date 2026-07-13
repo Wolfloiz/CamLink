@@ -19,10 +19,15 @@ técnica central: **fork do scrcpy-server** (Java, roda no Android com UID shell
 ADB) com uma thread de controle extra que aceita comandos JSON num socket
 `localabstract`, permitindo controles Camera2 em runtime (zoom, foco, exposição,
 ISO, WB, EIS, torch), modos inteligentes (Auto/Night/Sport/Pro) e captura RAW
-(DNG) — tudo sobre a `CameraCaptureSession` que o próprio servidor possui. O vídeo
-flui pela pipeline padrão do scrcpy; no Linux via `--v4l2-sink` direto para
-v4l2loopback, no Windows via stream H.264 decodificado e empurrado para uma câmera
-virtual DirectShow própria (filtro Rust/`windows-rs`, ver research.md R4).
+(DNG) — tudo sobre a `CameraCaptureSession` que o próprio servidor possui. No
+Linux, o vídeo flui pela pipeline padrão do cliente scrcpy via `--v4l2-sink`
+direto para v4l2loopback. No Windows, o cliente scrcpy não é usado para vídeo
+(seu `--record` sempre exige arquivo seekable, não há stdout — ver research.md
+R12): `stream_manager.rs` replica o bootstrap do servidor (adb push + adb
+forward + `app_process`) e fala o protocolo de socket de vídeo do scrcpy
+diretamente, decodificando H264 via subprocesso ffmpeg (pipes, sem arquivo) e
+empurrando para uma câmera virtual DirectShow própria (filtro
+Rust/`windows-rs`, ver research.md R4).
 Fontes RTSP usam pipeline ffmpeg low-delay.
 App desktop em Tauri 2.x (backend Rust) com frontend Svelte.
 
@@ -35,10 +40,15 @@ no Android, fora do alcance do Rust); TypeScript/Svelte no frontend Tauri.
 **Primary Dependencies**:
 - Tauri 2.x (shell do app, bundling, IPC frontend↔backend) — **fixa o
   TODO(GUI_FRAMEWORK) da constituição**
-- scrcpy ≥ 4.0 (cliente C, dependência de runtime) + fork do `scrcpy-server`
-  (submodule, branch `camlink` sobre a tag do cliente)
-- adb (android-tools) — detecção, túnel `adb forward`
-- ffmpeg — pipeline RTSP low-delay e decode no caminho Windows
+- scrcpy ≥ 4.0 (cliente C, usado apenas no Linux — vídeo via `--v4l2-sink`) +
+  fork do `scrcpy-server` (submodule, branch `camlink` sobre a tag do
+  cliente; jar stock em US1/T024, jar forkado com socket de controle a
+  partir de US2/T037)
+- adb (android-tools) — detecção, túnel `adb forward`; no Windows,
+  `stream_manager.rs` replica o bootstrap do servidor scrcpy sem passar pelo
+  binário cliente (research.md R12)
+- ffmpeg — pipeline RTSP low-delay e decode do H264 bruto no caminho Windows
+  (stdin/stdout, sem arquivo)
 - v4l2loopback ≥ 0.13 (Linux) / filtro DirectShow próprio via `windows-rs`
   (Windows — `Win32_Media_DirectShow`; substitui akvirtualcamera, reprovado
   no Spike B, ver research.md R4)
