@@ -213,7 +213,7 @@ async fn start_stream(
 /// capture_one_frame_linux` e de T022.
 #[cfg(target_os = "linux")]
 fn spawn_preview_polling_linux(app: AppHandle, session_id: Uuid, device_path: String) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         loop {
             let state = app.state::<AppState>();
             let still_running = matches!(
@@ -284,7 +284,7 @@ struct PreviewFrameEvent {
 /// `Idle` (FR-010). Cada `start_stream` bem-sucedido dispara uma instância
 /// deste emissor; ele mesmo termina quando não há mais nada a reportar.
 fn spawn_session_state_emitter(app: AppHandle, session_id: Uuid) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut last_state: Option<SessionState> = None;
         loop {
             let session = {
@@ -315,7 +315,7 @@ fn spawn_session_state_emitter(app: AppHandle, session_id: Uuid) {
 /// o cache de `list_devices` e emite `device_connected`/`device_disconnected`
 /// /`device_unauthorized`.
 fn spawn_device_polling(app: AppHandle, adb_path: PathBuf) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut previous: Vec<AndroidDevice> = Vec::new();
         loop {
             match device_manager::poll_devices(&adb_path, &mut previous).await {
@@ -349,6 +349,16 @@ fn spawn_device_polling(app: AppHandle, adb_path: PathBuf) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Tauri não entra sozinho num runtime Tokio (o loop de eventos da
+    // janela não é tokio); sem isso, qualquer `tokio::spawn`/`.await` fora
+    // do handler de um comando (ex.: dentro de `.setup()`) panica com
+    // "there is no reactor running" — só apareceu rodando `cargo tauri dev`
+    // de verdade, nenhum teste (todos `#[tokio::test]`, que já entram no
+    // runtime sozinhos) pegava isso.
+    let runtime = tokio::runtime::Runtime::new().expect("falha ao criar runtime tokio");
+    tauri::async_runtime::set(runtime.handle().clone());
+    let _runtime_guard = runtime.enter();
+
     let adb_path = PathBuf::from("adb");
     let app_state = AppState {
         stream_manager: StreamManager::new(resolve_external_paths()),

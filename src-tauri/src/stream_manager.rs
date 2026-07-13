@@ -42,6 +42,14 @@ pub const SCRCPY_DEVICE_SERVER_PATH: &str = "/data/local/tmp/scrcpy-server.jar";
 pub const SCRCPY_VERSION: &str = "4.0";
 
 const RETRY_BACKOFF: Duration = Duration::from_millis(200);
+const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(3);
+/// Se uma tentativa não fica de pé por pelo menos isso, o próximo retry
+/// dobra o backoff em vez de repetir o mesmo intervalo curto — visto em
+/// hardware real (Samsung SM-G781B): reabrir a câmera rápido demais depois
+/// de um crash esbarra em "system-wide limit for number of open cameras"
+/// porque o Android ainda não liberou o handle anterior, e retry a 200ms
+/// só faz o loop se perpetuar mais rápido.
+const HEALTHY_STREAK: Duration = Duration::from_secs(2);
 const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Sinal de parada compartilhado entre `stop()` e a task de monitor de uma
@@ -185,9 +193,17 @@ pub fn build_server_launch_args(scid: u32, config: &StreamConfig) -> Vec<String>
     ]
 }
 
+/// `<SCID>` é documentado como "a 31-bit random number" (`doc/develop.md`
+/// §Connection) — o servidor real faz `Integer.parseInt(scidStr, 16)`
+/// (`Options.java`), que é **assinado**: qualquer valor com o bit 31 ligado
+/// estoura `NumberFormatException` e mata o processo na hora. Confirmado
+/// em hardware real (Samsung SM-G781B): sem a máscara, o scid derivado de
+/// bytes de UUID tinha ~50% de chance de ter esse bit ligado, crashando o
+/// servidor sempre e disparando um loop de reconexão em ~600ms
+/// (research.md R12).
 fn scid_from_session(id: Uuid) -> u32 {
     let bytes = id.as_bytes();
-    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) & 0x7FFF_FFFF
 }
 
 // ---------------------------------------------------------------------------
@@ -377,25 +393,65 @@ async fn bootstrap_windows_server(
 // isso via timeout de staleness, ver `virtualcam::dshow`).
 // ---------------------------------------------------------------------------
 
+/// Tempo máximo esperando o processo do servidor no device terminar de
+/// subir (`app_process` → carregar classes → `DesktopConnection.open()` →
+/// `accept()`) antes de considerar o socket de vídeo indisponível. Sem
+/// isso, a primeira tentativa de conexão (imediatamente após spawnar o
+/// processo) corre contra o boot da JVM no device: `adb forward` aceita a
+/// conexão TCP do lado do host mesmo sem nada ouvindo ainda do lado do
+/// device, e a leitura subsequente recebe EOF assim que o adb desfaz o
+/// relay — o retry cobre conectar de novo, não só reler.
+#[cfg(target_os = "windows")]
+const VIDEO_SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "windows")]
+const VIDEO_SOCKET_RETRY_INTERVAL: Duration = Duration::from_millis(150);
+
+#[cfg(target_os = "windows")]
+async fn connect_video_socket_with_retry(
+    forward_port: u16,
+) -> Result<tokio::net::TcpStream, AppError> {
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpStream;
+
+    let deadline = tokio::time::Instant::now() + VIDEO_SOCKET_CONNECT_TIMEOUT;
+    loop {
+        let attempt: Result<TcpStream, AppError> = async {
+            let mut socket = TcpStream::connect(("127.0.0.1", forward_port))
+                .await
+                .map_err(|e| {
+                    AppError::new(
+                        "video_socket_connect_failed",
+                        format!("Falha ao conectar no socket de vídeo: {e}"),
+                    )
+                })?;
+            // O dummy byte só é enviado depois que o device chama
+            // `accept()` — lê-lo aqui (em vez de só conectar) é o que de
+            // fato confirma que o servidor já está pronto do outro lado.
+            let mut dummy = [0u8; 1];
+            socket.read_exact(&mut dummy).await.map_err(io_err)?;
+            Ok(socket)
+        }
+        .await;
+
+        match attempt {
+            Ok(socket) => return Ok(socket),
+            Err(err) if tokio::time::Instant::now() >= deadline => return Err(err),
+            Err(_) => tokio::time::sleep(VIDEO_SOCKET_RETRY_INTERVAL).await,
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, sink: FrameSink) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
 
     let result: Result<(), AppError> = async {
-        let mut socket = TcpStream::connect(("127.0.0.1", forward_port))
-            .await
-            .map_err(|e| {
-                AppError::new(
-                    "video_socket_connect_failed",
-                    format!("Falha ao conectar no socket de vídeo: {e}"),
-                )
-            })?;
+        let mut socket = connect_video_socket_with_retry(forward_port).await?;
 
-        // Handshake (research.md R12 / doc/develop.md §Connection): 1 byte
-        // dummy (detecta erro de conexão) + 64 bytes de nome do device.
-        let mut dummy = [0u8; 1];
-        socket.read_exact(&mut dummy).await.map_err(io_err)?;
+        // Handshake (research.md R12 / doc/develop.md §Connection): o dummy
+        // byte já foi consumido por `connect_video_socket_with_retry`
+        // (é o sinal de que o servidor está pronto); falta só o nome do
+        // device (64 bytes).
         let mut name_buf = [0u8; DEVICE_NAME_FIELD_LENGTH];
         socket.read_exact(&mut name_buf).await.map_err(io_err)?;
         let device_name = parse_device_name(&name_buf);
@@ -725,6 +781,12 @@ async fn wait_for_exit_or_fatal_stderr(
                                 let _ = child.wait().await;
                                 return MonitorOutcome::FatalStderr(err);
                             }
+                            // Linhas não-fatais eram descartadas em
+                            // silêncio — não dava pra ver por que o
+                            // scrcpy-server real morria rápido no device
+                            // (só "early eof" do lado do socket de vídeo,
+                            // sem nenhum stderr do processo em si).
+                            tracing::debug!(stderr = %text, "backend stderr");
                         }
                         _ => {
                             // stderr fechado/erro de leitura: só resta
@@ -770,6 +832,9 @@ async fn monitor_session(
     video_sink: Option<FrameSink>,
     control: Arc<SessionControl>,
 ) {
+    let mut backoff = RETRY_BACKOFF;
+    let mut last_recovery = tokio::time::Instant::now();
+
     loop {
         let child = {
             let mut guard = sessions.lock().await;
@@ -814,7 +879,12 @@ async fn monitor_session(
                     return;
                 }
 
-                tokio::time::sleep(RETRY_BACKOFF).await;
+                backoff = if last_recovery.elapsed() < HEALTHY_STREAK {
+                    (backoff * 2).min(MAX_RETRY_BACKOFF)
+                } else {
+                    RETRY_BACKOFF
+                };
+                tokio::time::sleep(backoff).await;
 
                 if control.is_stop_requested() {
                     finish_stop(&sessions, session_id).await;
@@ -834,6 +904,7 @@ async fn monitor_session(
                             None => false,
                         };
                         if recovered {
+                            last_recovery = tokio::time::Instant::now();
                             maybe_spawn_video_pipeline(&paths, forward_port, video_sink.as_ref());
                             if let Some(running) = guard.get_mut(&session_id) {
                                 running.child = Some(new_child);
@@ -847,6 +918,37 @@ async fn monitor_session(
                     Err(_) => return,
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regressão: encontrada em hardware real (Samsung SM-G781B) —
+    /// `scid_from_session` sem a máscara de 31 bits gerava valores como
+    /// `0xce9cd994` que o servidor real rejeita com
+    /// `NumberFormatException: For input string: "ce9cd994" under radix 16`
+    /// (via `Integer.parseInt`, assinado), crashando o processo a cada
+    /// tentativa.
+    #[test]
+    fn scid_never_sets_bit_31() {
+        // UUID cujos 4 primeiros bytes têm o bit mais significativo ligado
+        // (0xce...) — exatamente o padrão que crashava o servidor real.
+        let id = Uuid::from_bytes([0xce, 0x9c, 0xd9, 0x94, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let scid = scid_from_session(id);
+        assert!(
+            scid <= 0x7FFF_FFFF,
+            "scid {scid:#010x} tem o bit 31 ligado — Integer.parseInt (assinado) no servidor real rejeita"
+        );
+    }
+
+    #[test]
+    fn scid_stays_within_31_bits_for_many_uuids() {
+        for _ in 0..1000 {
+            let scid = scid_from_session(Uuid::new_v4());
+            assert!(scid <= 0x7FFF_FFFF, "scid {scid:#010x} excede 31 bits");
         }
     }
 }

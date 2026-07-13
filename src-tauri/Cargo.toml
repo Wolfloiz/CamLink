@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Câmeras Android e IP como webcams virtuais (Linux + Windows)"
 license = "GPL-3.0"
 edition = "2021"
+# `fake_backend` (tests/bin, T018) criou um segundo [[bin]] no crate; sem
+# isso, `cargo run`/`cargo tauri dev` fica ambíguo sobre qual rodar.
+default-run = "camlink"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

@@ -396,3 +396,57 @@ Nenhum NEEDS CLARIFICATION permanece.
   (a sessão continua rodando, a câmera fica em standby), mas o caminho
   precisa de hardware real para validação completa (mesma ressalva de R4
   sobre a ponte de memória compartilhada do DirectShow).
+- **Validação em hardware real (2026-07-13, Samsung SM-G781B/Android 13,
+  `cargo tauri dev`)**: primeira execução ponta a ponta encontrou e corrigiu
+  quatro bugs reais, nenhum coberto pelos testes de unidade (todos exigiam
+  o processo/dispositivo de verdade):
+  1. **`cargo run` ambíguo**: o binário de teste `fake_backend` (T018) virou
+     um segundo `[[bin]]` no crate: `cargo tauri dev` (que roda `cargo run`
+     por baixo) parava com "could not determine which binary to run".
+     Corrigido com `default-run = "camlink"` no `Cargo.toml`.
+  2. **Sem runtime Tokio**: `tauri::Builder::default()` não entra sozinho
+     num runtime Tokio — o loop de eventos da janela não é async. Qualquer
+     `tokio::spawn` chamado de fora do handler de um comando (aqui,
+     `spawn_device_polling` dentro de `.setup()`) panicava com "there is no
+     reactor running". Nenhum teste pegava isso porque todos são
+     `#[tokio::test]`, que já entram no runtime sozinhos. Corrigido criando
+     um `tokio::runtime::Runtime` explícito em `run()` e registrando-o via
+     `tauri::async_runtime::set()`; as tasks de topo (`spawn_device_polling`
+     e as duas outras em `lib.rs`) passaram a usar
+     `tauri::async_runtime::spawn` (funciona independente da thread
+     chamadora; `tokio::spawn` cru exige contexto já ativo na thread).
+  3. **scid não cabe em 31 bits**: `scid_from_session` gerava um `u32`
+     cheio a partir de bytes de UUID; o servidor real faz
+     `Integer.parseInt(scidStr, 16)` (assinado) e crasha com
+     `NumberFormatException` sempre que o bit 31 vem ligado — a doc já
+     dizia "31-bit random number" (`doc/develop.md` §Connection), mas a
+     implementação não respeitava isso. Sem esse fix o servidor morria
+     instantaneamente em ~50% das sessões (qualquer UUID com esse bit
+     ligado), disparando um loop de reconexão a cada ~600ms. Corrigido com
+     `& 0x7FFF_FFFF`; teste de regressão `scid_never_sets_bit_31` +
+     `scid_stays_within_31_bits_for_many_uuids` (1000 UUIDs aleatórios) em
+     `stream_manager.rs`.
+  4. **Conexão do socket de vídeo sem retry**: mesmo com o scid corrigido,
+     a primeira tentativa de conectar no socket de vídeo (logo após spawnar
+     o processo) corria contra o boot da JVM no device — `adb forward`
+     aceita a conexão TCP do lado do host mesmo sem nada ouvindo ainda do
+     lado do device, e a leitura seguinte recebia EOF assim que o adb
+     desfazia o relay. Corrigido com `connect_video_socket_with_retry`
+     (reconecta por até 5 s, não só relê).
+  Com os quatro fixes, **o pipeline funcionou de ponta a ponta**: handshake,
+  session packet (1920×1080 real) e frames confirmados
+  (`pipeline de vídeo conectado`). Achado adicional, não um bug do
+  CamLink: a câmera do Samsung se desconecta sozinha após alguns segundos
+  de stream (`Camera disconnected` no log do servidor) — bate com o quirk
+  do `adaptivebrightnessgo` já documentado em R1 (evicção do cliente de
+  câmera UID shell). O reconector automático (FR-005/006) se recupera
+  corretamente; adicionado backoff exponencial (200 ms→3 s, resetado após
+  2 s saudáveis) porque o retry original a 200 ms reabria a câmera mais
+  rápido do que o Android liberava o handle anterior, virando
+  `CameraAccessException: system-wide limit for number of open cameras`
+  autoalimentado. A mitigação de fato para o quirk em si (desativar brilho
+  adaptativo durante o stream, ou diagnóstico acionável via FR-010)
+  continua em aberto, conforme já previsto em R1.
+  **Ainda não observado**: o frame chegando de fato na câmera virtual
+  DirectShow e aparecendo no OBS/Chrome — só a validação do pipeline até o
+  `ffmpeg`/`feed_frame` foi confirmada nesta sessão.
