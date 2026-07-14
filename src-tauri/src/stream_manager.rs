@@ -583,13 +583,27 @@ async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, fps: u32, s
             let mut buf = vec![0u8; frame_bytes];
             let mut decoded_count: u64 = 0;
             loop {
+                // DIAGNÓSTICO TEMPORÁRIO: fps travado em ~15 (metade do
+                // default de 30) — precisa isolar se o teto é decode+
+                // conversão do ffmpeg (dentro de `read_exact`) ou a cópia
+                // pra memória compartilhada do DirectShow (`sink`), já que
+                // as duas rodam em série aqui.
+                let read_start = tokio::time::Instant::now();
                 match ffmpeg_stdout.read_exact(&mut buf).await {
                     Ok(_) => {
+                        let read_elapsed = read_start.elapsed();
                         decoded_count += 1;
-                        if decoded_count <= 3 || decoded_count.is_multiple_of(60) {
-                            tracing::info!(decoded_count, "frame decodificado pelo ffmpeg");
-                        }
+                        let sink_start = tokio::time::Instant::now();
                         sink(&buf);
+                        let sink_elapsed = sink_start.elapsed();
+                        if decoded_count <= 5 || decoded_count.is_multiple_of(30) {
+                            tracing::info!(
+                                decoded_count,
+                                read_ms = read_elapsed.as_millis(),
+                                sink_ms = sink_elapsed.as_millis(),
+                                "frame decodificado pelo ffmpeg"
+                            );
+                        }
                     }
                     Err(e) => {
                         // Antes esse `while ... .is_ok()` saía em silêncio;
@@ -611,10 +625,54 @@ async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, fps: u32, s
                 break;
             }
             let Some(header) = parse_frame_header(&header_buf) else {
-                // pacote de sessão inesperado no meio do stream (rotação) —
-                // encerra este pipeline; o próximo spawn reconecta.
-                tracing::warn!(packet_count, bytes_forwarded, "pacote de sessão inesperado no meio do stream (rotação?)");
-                break;
+                // `parse_frame_header` só retorna `None` quando o bit 0x80
+                // tá setado, ou seja: só pode ser pacote de sessão. O
+                // servidor manda um novo sem fechar o socket sempre que
+                // `SurfaceEncoder.prepareRetry()` recupera de um erro de
+                // captura internamente (visto em hardware real: "Capture/
+                // encoding error" + "Camera capture failed" no stderr do
+                // backend, seguido de um novo pacote de sessão com a MESMA
+                // resolução). Encerrar o pipeline aqui fechava o socket na
+                // cara do servidor no meio desse retry — o
+                // `IO.writeFully` seguinte vira broken pipe, que
+                // `SurfaceEncoder` trata como fatal (não tenta de novo),
+                // derrubando o processo inteiro e forçando nosso reconnect
+                // completo (mata processo, adb push, novo spawn, ~5-7s)
+                // por algo que o próprio servidor já resolvia sozinho em
+                // ~50ms. Resolução igual → segue lendo pela mesma conexão;
+                // resolução diferente (rotação de verdade) → aí sim precisa
+                // reconfigurar o decoder, então encerra pro reconnect.
+                match parse_session_packet(&header_buf) {
+                    Some(new_session)
+                        if new_session.width == session.width
+                            && new_session.height == session.height =>
+                    {
+                        tracing::info!(
+                            packet_count,
+                            bytes_forwarded,
+                            width = new_session.width,
+                            height = new_session.height,
+                            "nova sessão de captura no device (mesma resolução) — mantendo a conexão"
+                        );
+                        continue;
+                    }
+                    Some(new_session) => {
+                        tracing::warn!(
+                            packet_count,
+                            bytes_forwarded,
+                            old_width = session.width,
+                            old_height = session.height,
+                            new_width = new_session.width,
+                            new_height = new_session.height,
+                            "nova sessão de captura com resolução diferente — encerrando pipeline para reconectar"
+                        );
+                        break;
+                    }
+                    None => {
+                        tracing::warn!(packet_count, bytes_forwarded, "pacote inesperado no meio do stream (nem frame nem sessão válida)");
+                        break;
+                    }
+                }
             };
             let mut payload = vec![0u8; header.packet_size as usize];
             if header.packet_size > 0 {

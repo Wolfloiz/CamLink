@@ -42,6 +42,10 @@ const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SESSION_STATE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PREVIEW_INTERVAL: Duration = Duration::from_secs(1);
 const VIRTUAL_CAMERA_LABEL: &str = "CamLink Android";
+/// EMA aplicada em `SessionStats.fps` — janela efetiva ~= POLL_INTERVAL /
+/// (1 - FPS_SMOOTHING) ≈ 1,25s, escolhida pra cobrir o período de rajada
+/// (~1s) observado em hardware real (ver `spawn_session_state_emitter`).
+const FPS_SMOOTHING: f32 = 0.8;
 
 fn new_vcam_backend() -> Box<dyn VirtualCameraBackend + Send> {
     #[cfg(target_os = "linux")]
@@ -327,6 +331,7 @@ fn spawn_session_state_emitter(
     tauri::async_runtime::spawn(async move {
         let mut last_frame_count = 0u64;
         let mut last_tick = tokio::time::Instant::now();
+        let mut smoothed_fps = 0.0f32;
         loop {
             let session = {
                 let state = app.state::<AppState>();
@@ -340,8 +345,19 @@ fn spawn_session_state_emitter(
             let current_count = frame_count.load(std::sync::atomic::Ordering::Relaxed);
             let elapsed = (now - last_tick).as_secs_f32();
             if elapsed > 0.0 {
-                session.stats.fps = (current_count - last_frame_count) as f32 / elapsed;
+                // A taxa instantânea por tick (250ms) tem alias com o
+                // padrão real de chegada dos frames, que em hardware real
+                // (Samsung SM-G781B) veio em rajadas de ~1s (provável
+                // intervalo de GOP/keyframe) — o valor cru oscilava entre
+                // ~4 e ~27 fps a cada tick mesmo com uma taxa sustentada
+                // real de ~15 fps (confirmado contra os timestamps de
+                // `decoded_count` do próprio ffmpeg). Suavizado por EMA
+                // (janela efetiva ~1,25s) em vez de mostrar o valor cru.
+                let instantaneous_fps = (current_count - last_frame_count) as f32 / elapsed;
+                smoothed_fps =
+                    smoothed_fps * FPS_SMOOTHING + instantaneous_fps * (1.0 - FPS_SMOOTHING);
             }
+            session.stats.fps = smoothed_fps;
             last_frame_count = current_count;
             last_tick = now;
 
