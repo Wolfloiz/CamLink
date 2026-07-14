@@ -58,15 +58,42 @@ fn new_vcam_backend() -> Box<dyn VirtualCameraBackend + Send> {
     }
 }
 
+/// Procura `scrcpy-server` (sem extensão) no mesmo diretório do binário
+/// `scrcpy`/`scrcpy.exe` resolvido via PATH — é assim que a distribuição
+/// oficial do scrcpy empacota os dois juntos (confirmado nesta máquina: o
+/// WinGet coloca o diretório real do pacote no PATH, não um shim). Mesma
+/// convenção que o cliente real usa para o path default do servidor
+/// (`SC_SERVER_PATH_DEFAULT`, relativo ao próprio binário), só que via
+/// busca no PATH em vez de relativo ao instalador do CamLink (ainda não
+/// existe — bundling fica para o instalador real).
+fn find_server_jar_next_to_scrcpy_binary() -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    let binary_name = if cfg!(windows) {
+        "scrcpy.exe"
+    } else {
+        "scrcpy"
+    };
+    std::env::split_paths(&path_var).find_map(|dir| {
+        if !dir.join(binary_name).is_file() {
+            return None;
+        }
+        let candidate = dir.join("scrcpy-server");
+        candidate.is_file().then_some(candidate)
+    })
+}
+
 /// Caminhos dos executáveis externos. v1: resolvidos via PATH (assume
-/// adb/scrcpy/ffmpeg instalados — quickstart.md pré-requisitos); o jar do
-/// scrcpy-server stock vem de `SCRCPY_SERVER_PATH` se definida, senão
-/// assume-se `scrcpy-server` no diretório de trabalho. Empacotamento real
+/// adb/scrcpy/ffmpeg instalados — quickstart.md pré-requisitos). O jar do
+/// scrcpy-server stock vem, em ordem: `SCRCPY_SERVER_PATH` se definida →
+/// procurado ao lado do binário `scrcpy` no PATH → `scrcpy-server` no
+/// diretório de trabalho como último recurso. Empacotamento real
 /// (instalador resolvendo paths bundled) fica para uma iteração futura.
 fn resolve_external_paths() -> ExternalPaths {
     let server_jar = std::env::var("SCRCPY_SERVER_PATH")
+        .ok()
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("scrcpy-server"));
+        .or_else(find_server_jar_next_to_scrcpy_binary)
+        .unwrap_or_else(|| PathBuf::from("scrcpy-server"));
     ExternalPaths {
         adb: PathBuf::from("adb"),
         scrcpy: PathBuf::from("scrcpy"),
@@ -137,8 +164,15 @@ async fn start_stream(
     let session_id_for_sink = Arc::clone(&session_id_cell);
     let preview_last = Arc::new(StdMutex::new(Instant::now() - PREVIEW_INTERVAL));
     let app_for_preview = app.clone();
+    // `SessionStats.fps` nunca era atualizado (ficava travado no 0.0 do
+    // valor inicial) — contamos aqui, fora do `stream_manager` (que não
+    // sabe nada sobre frames, só sobre o processo do backend), e
+    // computamos fps por delta no emissor de `session_state` abaixo.
+    let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let frame_count_for_sink = Arc::clone(&frame_count);
 
     let sink: FrameSink = Arc::new(move |frame: &[u8]| {
+        frame_count_for_sink.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut backend) = vcam_handle.lock() {
             let _ = backend.feed_frame(&vcam_id, frame);
         }
@@ -192,7 +226,7 @@ async fn start_stream(
         .await
         .ok_or_else(|| AppError::new("session_not_found", "Sessão sumiu logo após ser criada"))?;
 
-    spawn_session_state_emitter(app.clone(), session_id);
+    spawn_session_state_emitter(app.clone(), session_id, frame_count);
     #[cfg(target_os = "linux")]
     spawn_preview_polling_linux(app, session_id, vcam_target);
 
@@ -280,29 +314,48 @@ struct PreviewFrameEvent {
     jpeg_base64: String,
 }
 
-/// Emite `session_state` a cada mudança de estado até a sessão voltar a
-/// `Idle` (FR-010). Cada `start_stream` bem-sucedido dispara uma instância
-/// deste emissor; ele mesmo termina quando não há mais nada a reportar.
-fn spawn_session_state_emitter(app: AppHandle, session_id: Uuid) {
+/// Emite `session_state` a cada tick (`SESSION_STATE_POLL_INTERVAL`) até a
+/// sessão voltar a `Idle` (FR-010) — inclui fps/reconnects atualizados, que
+/// mudam sem necessariamente trocar de `SessionState`. Cada `start_stream`
+/// bem-sucedido dispara uma instância deste emissor; ele mesmo termina
+/// quando não há mais nada a reportar.
+fn spawn_session_state_emitter(
+    app: AppHandle,
+    session_id: Uuid,
+    frame_count: Arc<std::sync::atomic::AtomicU64>,
+) {
     tauri::async_runtime::spawn(async move {
-        let mut last_state: Option<SessionState> = None;
+        let mut last_frame_count = 0u64;
+        let mut last_tick = tokio::time::Instant::now();
         loop {
             let session = {
                 let state = app.state::<AppState>();
                 state.stream_manager.session(session_id).await
             };
-            let Some(session) = session else {
+            let Some(mut session) = session else {
                 break;
             };
-            if last_state.as_ref() != Some(&session.state) {
-                let payload = SessionStateEvent {
-                    session_id,
-                    state: session.state.clone(),
-                    stats: session.stats.clone(),
-                };
-                let _ = app.emit("session_state", payload);
-                last_state = Some(session.state.clone());
+
+            let now = tokio::time::Instant::now();
+            let current_count = frame_count.load(std::sync::atomic::Ordering::Relaxed);
+            let elapsed = (now - last_tick).as_secs_f32();
+            if elapsed > 0.0 {
+                session.stats.fps = (current_count - last_frame_count) as f32 / elapsed;
             }
+            last_frame_count = current_count;
+            last_tick = now;
+
+            // Emite sempre (não só em mudança de estado): fps/reconnects
+            // mudam a cada tick durante o streaming normal, sem transição
+            // de SessionState nenhuma — só emitir "toda transição" (leitura
+            // literal do contrato) deixava o fps aparecer travado no
+            // frontend o tempo todo.
+            let payload = SessionStateEvent {
+                session_id,
+                state: session.state.clone(),
+                stats: session.stats.clone(),
+            };
+            let _ = app.emit("session_state", payload);
             if session.state == SessionState::Idle {
                 break;
             }

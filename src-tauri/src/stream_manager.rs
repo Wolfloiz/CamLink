@@ -62,6 +62,12 @@ const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 struct SessionControl {
     stop_requested: AtomicBool,
     notify: Notify,
+    // Cada retentativa spawnava um novo run_video_pipeline sem nunca
+    // encerrar o anterior — vários pipelines (e vários processos ffmpeg)
+    // podiam ficar rodando em paralelo depois de reconexões, competindo
+    // pelo mesmo backend e poluindo o diagnóstico. Guarda o handle da
+    // instância atual para cancelar a anterior antes de subir uma nova.
+    video_pipeline: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl SessionControl {
@@ -69,6 +75,7 @@ impl SessionControl {
         Self {
             stop_requested: AtomicBool::new(false),
             notify: Notify::new(),
+            video_pipeline: Mutex::new(None),
         }
     }
 
@@ -79,6 +86,13 @@ impl SessionControl {
 
     fn is_stop_requested(&self) -> bool {
         self.stop_requested.load(Ordering::SeqCst)
+    }
+
+    async fn replace_video_pipeline(&self, handle: tokio::task::JoinHandle<()>) {
+        let mut slot = self.video_pipeline.lock().await;
+        if let Some(previous) = slot.replace(handle) {
+            previous.abort();
+        }
     }
 }
 
@@ -368,10 +382,10 @@ async fn bootstrap_windows_server(
     let forward_port = parse_forward_port(&String::from_utf8_lossy(&forward_output.stdout));
 
     let args = build_server_launch_args(scid, config);
-    let child = Command::new(&paths.adb)
+    let mut child = Command::new(&paths.adb)
         .args(&args)
         .envs(paths.extra_env.iter().cloned())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
@@ -381,6 +395,18 @@ async fn bootstrap_windows_server(
                 format!("Falha ao iniciar scrcpy-server: {e}"),
             )
         })?;
+    // scrcpy-server manda mensagens de nível info/debug pro stdout (só
+    // WARN/ERROR vão pro stderr, que já era capturado) — descartar o
+    // stdout inteiro escondia exatamente o tipo de pista que precisávamos
+    // pra entender por que a câmera do device cai sozinha.
+    if let Some(stdout) = child.stdout.take() {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::info!(stdout = %line, "backend stdout");
+            }
+        });
+    }
     Ok((child, forward_port))
 }
 
@@ -442,7 +468,7 @@ async fn connect_video_socket_with_retry(
 }
 
 #[cfg(target_os = "windows")]
-async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, sink: FrameSink) {
+async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, fps: u32, sink: FrameSink) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let result: Result<(), AppError> = async {
@@ -481,10 +507,36 @@ async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, sink: Frame
             "pipeline de vídeo conectado"
         );
 
+        // H264 elementar puro não carrega PTS/DTS nenhum (só NAL units, sem
+        // container) — sem dizer o fps, avformat_find_stream_info() tenta
+        // *inferir* o frame rate observando o timing real de chegada dos
+        // bytes. `-r` elimina a necessidade de inferir; probesize/
+        // analyzeduration moderados (bem menos que o default, mas não
+        // zerados como numa tentativa anterior que também quebrou o
+        // parsing) ficam como rede de segurança.
+        //
+        // `-fflags nobuffer` NÃO entra: isolado em hardware real (dump do
+        // H264 bruto pra disco + replay offline com `ffprobe`/`ffmpeg`, ver
+        // git log) — com esse flag o filtergraph auto-inserido
+        // (yuv420p→rgba) nunca recebe frame nenhum do decoder
+        // ("No filtered frames for output stream" / "Output file is empty"
+        // mesmo lendo um arquivo local inteiro, sem nenhuma pressão de
+        // tempo). Sem ele, o mesmíssimo dado decodifica normalmente.
+        let fps_arg = fps.max(1).to_string();
         let mut ffmpeg = Command::new(&ffmpeg_path)
             .args([
                 "-loglevel",
-                "error",
+                "warning",
+                "-flags",
+                "low_delay",
+                "-threads",
+                "1",
+                "-r",
+                &fps_arg,
+                "-probesize",
+                "1000000",
+                "-analyzeduration",
+                "1000000",
                 "-f",
                 "h264",
                 "-i",
@@ -497,7 +549,7 @@ async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, sink: Frame
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
@@ -514,31 +566,82 @@ async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, sink: Frame
             .stdout
             .take()
             .ok_or_else(|| AppError::new("ffmpeg_io_error", "stdout do ffmpeg indisponível"))?;
+        // Sem isso não há como saber por que o ffmpeg parou de produzir
+        // frames — antes ia pro void (Stdio::null()), igual ao gap que já
+        // tinha existido com o stderr do próprio backend scrcpy.
+        if let Some(stderr) = ffmpeg.stderr.take() {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::warn!(stderr = %line, "ffmpeg stderr");
+                }
+            });
+        }
 
         let frame_bytes = session.width as usize * session.height as usize * 4;
         let reader_task = tokio::spawn(async move {
             let mut buf = vec![0u8; frame_bytes];
-            while ffmpeg_stdout.read_exact(&mut buf).await.is_ok() {
-                sink(&buf);
+            let mut decoded_count: u64 = 0;
+            loop {
+                match ffmpeg_stdout.read_exact(&mut buf).await {
+                    Ok(_) => {
+                        decoded_count += 1;
+                        if decoded_count <= 3 || decoded_count.is_multiple_of(60) {
+                            tracing::info!(decoded_count, "frame decodificado pelo ffmpeg");
+                        }
+                        sink(&buf);
+                    }
+                    Err(e) => {
+                        // Antes esse `while ... .is_ok()` saía em silêncio;
+                        // não dava pra saber se o ffmpeg nunca chegou a
+                        // produzir nada (0 frames) ou parou no meio.
+                        tracing::warn!(decoded_count, error = %e, "leitura do stdout do ffmpeg encerrada");
+                        break;
+                    }
+                }
             }
         });
 
         let mut header_buf = [0u8; 12];
+        let mut packet_count: u64 = 0;
+        let mut bytes_forwarded: u64 = 0;
         loop {
-            if socket.read_exact(&mut header_buf).await.is_err() {
+            if let Err(e) = socket.read_exact(&mut header_buf).await {
+                tracing::warn!(packet_count, bytes_forwarded, error = %e, "socket de vídeo fechou lendo o cabeçalho de frame");
                 break;
             }
             let Some(header) = parse_frame_header(&header_buf) else {
-                break; // pacote de sessão inesperado no meio do stream (rotação) — encerra este pipeline; o próximo spawn reconecta
+                // pacote de sessão inesperado no meio do stream (rotação) —
+                // encerra este pipeline; o próximo spawn reconecta.
+                tracing::warn!(packet_count, bytes_forwarded, "pacote de sessão inesperado no meio do stream (rotação?)");
+                break;
             };
             let mut payload = vec![0u8; header.packet_size as usize];
-            if header.packet_size > 0 && socket.read_exact(&mut payload).await.is_err() {
+            if header.packet_size > 0 {
+                if let Err(e) = socket.read_exact(&mut payload).await {
+                    tracing::warn!(packet_count, bytes_forwarded, packet_size = header.packet_size, error = %e, "socket de vídeo fechou lendo o payload");
+                    break;
+                }
+            }
+            if let Err(e) = ffmpeg_stdin.write_all(&payload).await {
+                tracing::warn!(packet_count, bytes_forwarded, error = %e, "escrita no stdin do ffmpeg falhou");
                 break;
             }
-            if ffmpeg_stdin.write_all(&payload).await.is_err() {
-                break;
+            packet_count += 1;
+            bytes_forwarded += payload.len() as u64;
+            if packet_count <= 5 || packet_count.is_multiple_of(60) {
+                tracing::info!(
+                    packet_count,
+                    bytes_forwarded,
+                    packet_size = header.packet_size,
+                    config_packet = header.config_packet,
+                    key_frame = header.key_frame,
+                    pts = header.pts,
+                    "pacote de vídeo encaminhado ao ffmpeg"
+                );
             }
         }
+        tracing::info!(packet_count, bytes_forwarded, "loop de leitura do socket de vídeo encerrado");
 
         drop(ffmpeg_stdin);
         let _ = ffmpeg.wait().await;
@@ -563,20 +666,25 @@ fn io_err(e: std::io::Error) -> AppError {
 /// Sobe o pipeline de vídeo (Windows) em background quando há porta e sink
 /// disponíveis; no-op no Linux e quando `video_sink` é `None` (ex.: testes
 /// de lifecycle, que não exercitam o protocolo real — research.md R11).
+/// Cancela qualquer pipeline anterior da mesma sessão antes de subir um novo
+/// (ver doc de `SessionControl::video_pipeline`).
 #[allow(unused_variables)]
-fn maybe_spawn_video_pipeline(
+async fn maybe_spawn_video_pipeline(
     paths: &ExternalPaths,
     forward_port: Option<u16>,
+    fps: u32,
     video_sink: Option<&FrameSink>,
+    control: &SessionControl,
 ) {
     #[cfg(target_os = "windows")]
     {
         if let (Some(port), Some(sink)) = (forward_port, video_sink) {
             let ffmpeg_path = paths.ffmpeg.clone();
             let sink = Arc::clone(sink);
-            tokio::spawn(async move {
-                run_video_pipeline(ffmpeg_path, port, sink).await;
+            let handle = tokio::spawn(async move {
+                run_video_pipeline(ffmpeg_path, port, fps, sink).await;
             });
+            control.replace_video_pipeline(handle).await;
         }
     }
 }
@@ -636,12 +744,19 @@ impl StreamManager {
         };
         session.apply(SessionEvent::Start)?;
 
+        let control = Arc::new(SessionControl::new());
+
         let (child, forward_port) =
             spawn_backend(&self.paths, &config, virtual_camera_target, session_id).await?;
-        maybe_spawn_video_pipeline(&self.paths, forward_port, video_sink.as_ref());
+        maybe_spawn_video_pipeline(
+            &self.paths,
+            forward_port,
+            config.fps,
+            video_sink.as_ref(),
+            &control,
+        )
+        .await;
         session.apply(SessionEvent::Started)?;
-
-        let control = Arc::new(SessionControl::new());
         {
             let mut sessions = self.sessions.lock().await;
             sessions.insert(
@@ -781,12 +896,14 @@ async fn wait_for_exit_or_fatal_stderr(
                                 let _ = child.wait().await;
                                 return MonitorOutcome::FatalStderr(err);
                             }
-                            // Linhas não-fatais eram descartadas em
-                            // silêncio — não dava pra ver por que o
-                            // scrcpy-server real morria rápido no device
-                            // (só "early eof" do lado do socket de vídeo,
-                            // sem nenhum stderr do processo em si).
-                            tracing::debug!(stderr = %text, "backend stderr");
+                            // Linhas não-fatais eram descartadas em nível
+                            // debug (invisível no log padrão) — não dava pra
+                            // ver por que o scrcpy-server real morria rápido
+                            // no device (só "early eof" do lado do socket de
+                            // vídeo, sem nenhum stderr visível do processo
+                            // em si). warn! temporário até achar a causa raiz
+                            // da conexão caindo a cada poucos segundos.
+                            tracing::warn!(stderr = %text, "backend stderr");
                         }
                         _ => {
                             // stderr fechado/erro de leitura: só resta
@@ -884,7 +1001,19 @@ async fn monitor_session(
                 } else {
                     RETRY_BACKOFF
                 };
-                tokio::time::sleep(backoff).await;
+                // backoff pode chegar a MAX_RETRY_BACKOFF (3s); um
+                // sleep() simples aqui deixava stop() esperando o sleep
+                // inteiro terminar antes de sequer checar o pedido de
+                // parada de novo — corrida real contra o STOP_WAIT_TIMEOUT
+                // de stop() (5s), causada pelo próprio backoff exponencial
+                // adicionado depois de ver o crash-loop em hardware real.
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = control.notify.notified() => {
+                        finish_stop(&sessions, session_id).await;
+                        return;
+                    }
+                }
 
                 if control.is_stop_requested() {
                     finish_stop(&sessions, session_id).await;
@@ -905,9 +1034,20 @@ async fn monitor_session(
                         };
                         if recovered {
                             last_recovery = tokio::time::Instant::now();
-                            maybe_spawn_video_pipeline(&paths, forward_port, video_sink.as_ref());
+                            maybe_spawn_video_pipeline(
+                                &paths,
+                                forward_port,
+                                config.fps,
+                                video_sink.as_ref(),
+                                &control,
+                            )
+                            .await;
                             if let Some(running) = guard.get_mut(&session_id) {
                                 running.child = Some(new_child);
+                                // Nunca era incrementado antes — stats.reconnects
+                                // ficava travado em 0 pra sempre, mesmo com o
+                                // reconector funcionando de verdade.
+                                running.session.stats.reconnects += 1;
                             }
                         } else {
                             drop(guard);
