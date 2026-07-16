@@ -85,12 +85,19 @@ pub fn parse_list_output(stdout: &str) -> Vec<LoopbackDevice> {
 /// Parseia a versão de `v4l2loopback-ctl --version`/`-v`
 /// (`<progname> v<major>.<minor>.<bugfix>`).
 pub fn parse_ctl_version(stdout: &str) -> Option<(u32, u32, u32)> {
-    let token = stdout.split_whitespace().find(|t| t.starts_with('v'))?;
-    let mut parts = token.trim_start_matches('v').split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let bugfix = parts.next()?.parse().ok()?;
-    Some((major, minor, bugfix))
+    // Primeiro token que fecha o formato `vX.Y.Z` completo — filtrar só por
+    // prefixo "v" fazia o nome do próprio programa ("v4l2loopback-ctl") ser
+    // tomado como token de versão, e o parse abortava ali.
+    stdout
+        .split_whitespace()
+        .filter_map(|token| {
+            let mut parts = token.strip_prefix('v')?.split('.');
+            let major = parts.next()?.parse().ok()?;
+            let minor = parts.next()?.parse().ok()?;
+            let bugfix = parts.next()?.parse().ok()?;
+            Some((major, minor, bugfix))
+        })
+        .next()
 }
 
 /// `v4l2loopback-ctl add` sem device explícito só é confiável (alocação

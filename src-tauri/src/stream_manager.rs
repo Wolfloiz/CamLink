@@ -94,6 +94,16 @@ impl SessionControl {
             previous.abort();
         }
     }
+
+    /// O monitor encerra por vários caminhos (stop, erro fatal, retry
+    /// esgotado) e nenhum deles derrubava o pipeline da sessão — a task (e o
+    /// ffmpeg dela, `kill_on_drop`) sobrevivia à sessão.
+    async fn abort_video_pipeline(&self) {
+        let mut slot = self.video_pipeline.lock().await;
+        if let Some(handle) = slot.take() {
+            handle.abort();
+        }
+    }
 }
 
 /// Recebe frames RGBA decodificados (contrato de
@@ -179,6 +189,31 @@ pub fn build_scrcpy_client_args(config: &StreamConfig, v4l2_device: &str) -> Vec
     ]
 }
 
+/// Argumentos do ffmpeg que lê o lado de captura do device v4l2loopback e
+/// devolve frames RGBA pelo stdout (preview/fps no Linux — o scrcpy entrega
+/// os frames direto ao device via `--v4l2-sink`, então a única fonte de
+/// verdade do que a câmera virtual está exibindo é o próprio device). O
+/// `scale` garante frames do tamanho da configuração mesmo se o writer
+/// negociar outra geometria (ex.: rotação do device).
+pub fn build_v4l2_preview_args(device: &str, resolution: (u32, u32)) -> Vec<String> {
+    let (w, h) = resolution;
+    vec![
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-f".to_string(),
+        "v4l2".to_string(),
+        "-i".to_string(),
+        device.to_string(),
+        "-vf".to_string(),
+        format!("scale={w}:{h}"),
+        "-f".to_string(),
+        "rawvideo".to_string(),
+        "-pix_fmt".to_string(),
+        "rgba".to_string(),
+        "pipe:1".to_string(),
+    ]
+}
+
 /// Argumentos de `adb ... shell CLASSPATH=... app_process ...
 /// com.genymobile.scrcpy.Server` (Windows): bootstrap direto do servidor,
 /// sem passar pelo cliente `scrcpy` (research.md R12), replicando
@@ -215,6 +250,11 @@ pub fn build_server_launch_args(scid: u32, config: &StreamConfig) -> Vec<String>
 /// bytes de UUID tinha ~50% de chance de ter esse bit ligado, crashando o
 /// servidor sempre e disparando um loop de reconexão em ~600ms
 /// (research.md R12).
+///
+/// Só o bootstrap Windows usa (o Linux vai pelo cliente scrcpy), mas os
+/// testes de regressão rodam em qualquer plataforma — daí o `allow` em vez
+/// de `#[cfg]`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn scid_from_session(id: Uuid) -> u32 {
     let bytes = id.as_bytes();
     u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) & 0x7FFF_FFFF
@@ -314,14 +354,27 @@ async fn spawn_backend(
     {
         let _ = session_id;
         let args = build_scrcpy_client_args(config, virtual_camera_target);
-        let child = Command::new(&paths.scrcpy)
+        let mut child = Command::new(&paths.scrcpy)
             .args(&args)
             .envs(paths.extra_env.iter().cloned())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| AppError::new("spawn_failed", format!("Falha ao iniciar scrcpy: {e}")))?;
+        // O cliente scrcpy manda TUDO para o stdout — INFO, WARN e até os
+        // `[server] ERROR` re-ecoados; o stderr dele fica literalmente vazio
+        // (0 bytes, medido em hardware 2026-07-15). Descartar o stdout
+        // deixava o app cego a qualquer falha do backend (ex.: evicção da
+        // câmera com a tela apagada).
+        if let Some(stdout) = child.stdout.take() {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::info!(stdout = %line, "backend stdout");
+                }
+            });
+        }
         Ok((child, None))
     }
     #[cfg(target_os = "windows")]
@@ -721,16 +774,20 @@ fn io_err(e: std::io::Error) -> AppError {
     )
 }
 
-/// Sobe o pipeline de vídeo (Windows) em background quando há porta e sink
-/// disponíveis; no-op no Linux e quando `video_sink` é `None` (ex.: testes
-/// de lifecycle, que não exercitam o protocolo real — research.md R11).
-/// Cancela qualquer pipeline anterior da mesma sessão antes de subir um novo
-/// (ver doc de `SessionControl::video_pipeline`).
+/// Sobe o pipeline de vídeo em background; no-op quando `video_sink` é
+/// `None` (ex.: testes de lifecycle, que não exercitam o protocolo real —
+/// research.md R11). Windows: conecta no socket encaminhado e decodifica
+/// (precisa da porta). Linux: o scrcpy já entrega os frames ao device via
+/// `--v4l2-sink`, então o pipeline aqui é um *leitor* do lado de captura do
+/// device — é o que alimenta preview e fps (que nunca funcionavam no Linux:
+/// o sink jamais era chamado). Cancela qualquer pipeline anterior da mesma
+/// sessão antes de subir um novo (ver doc de `SessionControl::video_pipeline`).
 #[allow(unused_variables)]
 async fn maybe_spawn_video_pipeline(
     paths: &ExternalPaths,
     forward_port: Option<u16>,
-    fps: u32,
+    config: &StreamConfig,
+    virtual_camera_target: &str,
     video_sink: Option<&FrameSink>,
     control: &SessionControl,
 ) {
@@ -738,12 +795,102 @@ async fn maybe_spawn_video_pipeline(
     {
         if let (Some(port), Some(sink)) = (forward_port, video_sink) {
             let ffmpeg_path = paths.ffmpeg.clone();
+            let fps = config.fps;
             let sink = Arc::clone(sink);
             let handle = tokio::spawn(async move {
                 run_video_pipeline(ffmpeg_path, port, fps, sink).await;
             });
             control.replace_video_pipeline(handle).await;
         }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(sink) = video_sink {
+            let ffmpeg_path = paths.ffmpeg.clone();
+            let device = virtual_camera_target.to_string();
+            let resolution = config.resolution;
+            let sink = Arc::clone(sink);
+            let handle = tokio::spawn(async move {
+                run_preview_pipeline(ffmpeg_path, device, resolution, sink).await;
+            });
+            control.replace_video_pipeline(handle).await;
+        }
+    }
+}
+
+/// Lê frames RGBA do lado de captura do device v4l2loopback e entrega ao
+/// `FrameSink` (Linux). Reabre o leitor quando a leitura termina — o writer
+/// (scrcpy) renegocia o formato do device ao conectar/reconectar, o que
+/// derruba um leitor já aberto; a task só morre por `abort()` (stop da
+/// sessão ou substituição por um pipeline novo).
+#[cfg(target_os = "linux")]
+async fn run_preview_pipeline(
+    ffmpeg_path: PathBuf,
+    device: String,
+    resolution: (u32, u32),
+    sink: FrameSink,
+) {
+    use tokio::io::AsyncReadExt;
+
+    let (w, h) = resolution;
+    let frame_bytes = w as usize * h as usize * 4;
+    loop {
+        let result: Result<u64, AppError> = async {
+            let mut ffmpeg = Command::new(&ffmpeg_path)
+                .args(build_v4l2_preview_args(&device, resolution))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|e| {
+                    AppError::new(
+                        "preview_spawn_failed",
+                        format!("Falha ao iniciar ffmpeg do preview: {e}"),
+                    )
+                })?;
+            let mut stdout = ffmpeg.stdout.take().ok_or_else(|| {
+                AppError::new(
+                    "preview_io_error",
+                    "stdout do ffmpeg de preview indisponível",
+                )
+            })?;
+            if let Some(stderr) = ffmpeg.stderr.take() {
+                tokio::spawn(async move {
+                    let mut lines = BufReader::new(stderr).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        tracing::warn!(stderr = %line, "ffmpeg de preview stderr");
+                    }
+                });
+            }
+
+            let mut buf = vec![0u8; frame_bytes];
+            let mut frames: u64 = 0;
+            loop {
+                match stdout.read_exact(&mut buf).await {
+                    Ok(_) => {
+                        frames += 1;
+                        if frames == 1 {
+                            tracing::info!(%device, "pipeline de preview recebendo frames");
+                        }
+                        sink(&buf);
+                    }
+                    Err(e) => {
+                        tracing::warn!(frames, error = %e, "leitura do preview encerrada");
+                        break;
+                    }
+                }
+            }
+            let _ = ffmpeg.start_kill();
+            let _ = ffmpeg.wait().await;
+            Ok(frames)
+        }
+        .await;
+
+        if let Err(err) = result {
+            tracing::warn!(code = %err.code, msg = %err.msg, "pipeline de preview falhou");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -809,7 +956,8 @@ impl StreamManager {
         maybe_spawn_video_pipeline(
             &self.paths,
             forward_port,
-            config.fps,
+            &config,
+            virtual_camera_target,
             video_sink.as_ref(),
             &control,
         )
@@ -1007,117 +1155,127 @@ async fn monitor_session(
     video_sink: Option<FrameSink>,
     control: Arc<SessionControl>,
 ) {
-    let mut backoff = RETRY_BACKOFF;
-    let mut last_recovery = tokio::time::Instant::now();
+    // Corpo num bloco async para que todos os `return` (stop, erro fatal,
+    // retry esgotado) desemboquem num único ponto de limpeza do pipeline.
+    let control_cleanup = Arc::clone(&control);
+    async move {
+        let mut backoff = RETRY_BACKOFF;
+        let mut last_recovery = tokio::time::Instant::now();
 
-    loop {
-        let child = {
-            let mut guard = sessions.lock().await;
-            match guard.get_mut(&session_id).and_then(|r| r.child.take()) {
-                Some(c) => c,
-                None => return, // sessão parada ou inexistente
-            }
-        };
-
-        match wait_for_exit_or_fatal_stderr(child, &control).await {
-            MonitorOutcome::StoppedByUser => {
-                finish_stop(&sessions, session_id).await;
-                return;
-            }
-            MonitorOutcome::FatalStderr(err) => {
+        loop {
+            let child = {
                 let mut guard = sessions.lock().await;
-                if let Some(running) = guard.get_mut(&session_id) {
-                    let _ = running.session.apply(SessionEvent::Fail(err.msg));
+                match guard.get_mut(&session_id).and_then(|r| r.child.take()) {
+                    Some(c) => c,
+                    None => return, // sessão parada ou inexistente
                 }
-                return;
-            }
-            MonitorOutcome::Exited => {
-                if control.is_stop_requested() {
+            };
+
+            match wait_for_exit_or_fatal_stderr(child, &control).await {
+                MonitorOutcome::StoppedByUser => {
                     finish_stop(&sessions, session_id).await;
                     return;
                 }
-
-                let should_retry = {
+                MonitorOutcome::FatalStderr(err) => {
                     let mut guard = sessions.lock().await;
-                    match guard.get_mut(&session_id) {
-                        Some(running) if running.session.state == SessionState::Streaming => {
-                            running.session.apply(SessionEvent::SourceLost).is_ok()
-                                && running
-                                    .session
-                                    .apply(SessionEvent::ReconnectStarted)
-                                    .is_ok()
-                        }
-                        _ => false,
+                    if let Some(running) = guard.get_mut(&session_id) {
+                        let _ = running.session.apply(SessionEvent::Fail(err.msg));
                     }
-                };
-                if !should_retry {
                     return;
                 }
-
-                backoff = if last_recovery.elapsed() < HEALTHY_STREAK {
-                    (backoff * 2).min(MAX_RETRY_BACKOFF)
-                } else {
-                    RETRY_BACKOFF
-                };
-                // backoff pode chegar a MAX_RETRY_BACKOFF (3s); um
-                // sleep() simples aqui deixava stop() esperando o sleep
-                // inteiro terminar antes de sequer checar o pedido de
-                // parada de novo — corrida real contra o STOP_WAIT_TIMEOUT
-                // de stop() (5s), causada pelo próprio backoff exponencial
-                // adicionado depois de ver o crash-loop em hardware real.
-                tokio::select! {
-                    _ = tokio::time::sleep(backoff) => {}
-                    _ = control.notify.notified() => {
+                MonitorOutcome::Exited => {
+                    if control.is_stop_requested() {
                         finish_stop(&sessions, session_id).await;
                         return;
                     }
-                }
 
-                if control.is_stop_requested() {
-                    finish_stop(&sessions, session_id).await;
-                    return;
-                }
+                    let should_retry = {
+                        let mut guard = sessions.lock().await;
+                        match guard.get_mut(&session_id) {
+                            Some(running) if running.session.state == SessionState::Streaming => {
+                                running.session.apply(SessionEvent::SourceLost).is_ok()
+                                    && running
+                                        .session
+                                        .apply(SessionEvent::ReconnectStarted)
+                                        .is_ok()
+                            }
+                            _ => false,
+                        }
+                    };
+                    if !should_retry {
+                        return;
+                    }
 
-                match spawn_backend(&paths, &config, &virtual_camera_target, session_id).await {
-                    Ok((mut new_child, forward_port)) => {
-                        if control.is_stop_requested() {
-                            let _ = new_child.start_kill();
+                    backoff = if last_recovery.elapsed() < HEALTHY_STREAK {
+                        (backoff * 2).min(MAX_RETRY_BACKOFF)
+                    } else {
+                        RETRY_BACKOFF
+                    };
+                    // backoff pode chegar a MAX_RETRY_BACKOFF (3s); um
+                    // sleep() simples aqui deixava stop() esperando o sleep
+                    // inteiro terminar antes de sequer checar o pedido de
+                    // parada de novo — corrida real contra o STOP_WAIT_TIMEOUT
+                    // de stop() (5s), causada pelo próprio backoff exponencial
+                    // adicionado depois de ver o crash-loop em hardware real.
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff) => {}
+                        _ = control.notify.notified() => {
                             finish_stop(&sessions, session_id).await;
                             return;
                         }
-                        let mut guard = sessions.lock().await;
-                        let recovered = match guard.get_mut(&session_id) {
-                            Some(running) => running.session.apply(SessionEvent::Recovered).is_ok(),
-                            None => false,
-                        };
-                        if recovered {
-                            last_recovery = tokio::time::Instant::now();
-                            maybe_spawn_video_pipeline(
-                                &paths,
-                                forward_port,
-                                config.fps,
-                                video_sink.as_ref(),
-                                &control,
-                            )
-                            .await;
-                            if let Some(running) = guard.get_mut(&session_id) {
-                                running.child = Some(new_child);
-                                // Nunca era incrementado antes — stats.reconnects
-                                // ficava travado em 0 pra sempre, mesmo com o
-                                // reconector funcionando de verdade.
-                                running.session.stats.reconnects += 1;
-                            }
-                        } else {
-                            drop(guard);
-                            let _ = new_child.start_kill();
-                            return;
-                        }
                     }
-                    Err(_) => return,
+
+                    if control.is_stop_requested() {
+                        finish_stop(&sessions, session_id).await;
+                        return;
+                    }
+
+                    match spawn_backend(&paths, &config, &virtual_camera_target, session_id).await {
+                        Ok((mut new_child, forward_port)) => {
+                            if control.is_stop_requested() {
+                                let _ = new_child.start_kill();
+                                finish_stop(&sessions, session_id).await;
+                                return;
+                            }
+                            let mut guard = sessions.lock().await;
+                            let recovered = match guard.get_mut(&session_id) {
+                                Some(running) => {
+                                    running.session.apply(SessionEvent::Recovered).is_ok()
+                                }
+                                None => false,
+                            };
+                            if recovered {
+                                last_recovery = tokio::time::Instant::now();
+                                maybe_spawn_video_pipeline(
+                                    &paths,
+                                    forward_port,
+                                    &config,
+                                    &virtual_camera_target,
+                                    video_sink.as_ref(),
+                                    &control,
+                                )
+                                .await;
+                                if let Some(running) = guard.get_mut(&session_id) {
+                                    running.child = Some(new_child);
+                                    // Nunca era incrementado antes — stats.reconnects
+                                    // ficava travado em 0 pra sempre, mesmo com o
+                                    // reconector funcionando de verdade.
+                                    running.session.stats.reconnects += 1;
+                                }
+                            } else {
+                                drop(guard);
+                                let _ = new_child.start_kill();
+                                return;
+                            }
+                        }
+                        Err(_) => return,
+                    }
                 }
             }
         }
     }
+    .await;
+    control_cleanup.abort_video_pipeline().await;
 }
 
 #[cfg(test)]
@@ -1148,5 +1306,26 @@ mod tests {
             let scid = scid_from_session(Uuid::new_v4());
             assert!(scid <= 0x7FFF_FFFF, "scid {scid:#010x} excede 31 bits");
         }
+    }
+
+    /// O leitor de preview precisa devolver exatamente frames RGBA no
+    /// tamanho da configuração (o consumidor faz `read_exact(w*h*4)`), lendo
+    /// do device v4l2 — e escalando, porque quem define o formato do device
+    /// é o writer (scrcpy), não nós.
+    #[test]
+    fn preview_args_read_device_and_emit_rgba_at_config_size() {
+        let args = build_v4l2_preview_args("/dev/video9", (1280, 720));
+        let joined = args.join(" ");
+        assert!(joined.contains("-f v4l2 -i /dev/video9"), "{joined}");
+        assert!(joined.contains("-vf scale=1280:720"), "{joined}");
+        assert!(joined.contains("-pix_fmt rgba"), "{joined}");
+        assert!(
+            joined.ends_with("pipe:1"),
+            "saída deve ser o stdout: {joined}"
+        );
+        // Entrada (device) antes da saída (pipe) — ffmpeg é posicional.
+        let dev = args.iter().position(|a| a == "/dev/video9");
+        let pipe = args.iter().position(|a| a == "pipe:1");
+        assert!(dev < pipe, "{joined}");
     }
 }

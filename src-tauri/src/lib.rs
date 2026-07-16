@@ -177,9 +177,19 @@ async fn start_stream(
 
     let sink: FrameSink = Arc::new(move |frame: &[u8]| {
         frame_count_for_sink.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Ok(mut backend) = vcam_handle.lock() {
-            let _ = backend.feed_frame(&vcam_id, frame);
+        // Windows: o sink é o caminho de ENTREGA — os frames vêm do socket
+        // scrcpy e precisam ser empurrados à câmera virtual. Linux: os
+        // frames vêm do LEITOR do próprio device v4l2 (o scrcpy já escreveu
+        // lá via --v4l2-sink); realimentá-los com feed_frame criaria um
+        // loop device→sink→device.
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(mut backend) = vcam_handle.lock() {
+                let _ = backend.feed_frame(&vcam_id, frame);
+            }
         }
+        #[cfg(not(target_os = "windows"))]
+        let _ = (&vcam_handle, &vcam_id);
         let Some(session_id) = *session_id_for_sink.lock().unwrap() else {
             return;
         };
@@ -230,9 +240,7 @@ async fn start_stream(
         .await
         .ok_or_else(|| AppError::new("session_not_found", "Sessão sumiu logo após ser criada"))?;
 
-    spawn_session_state_emitter(app.clone(), session_id, frame_count);
-    #[cfg(target_os = "linux")]
-    spawn_preview_polling_linux(app, session_id, vcam_target);
+    spawn_session_state_emitter(app, session_id, frame_count);
 
     Ok(StartStreamResponse {
         session_id,
@@ -243,47 +251,11 @@ async fn start_stream(
     })
 }
 
-/// Linux: o cliente scrcpy escreve direto no device (`--v4l2-sink`), sem
-/// passar pelo nosso processo — diferente do Windows, onde os frames já
-/// fluem pelo `FrameSink`. Por isso o preview no Linux lê de volta o
-/// device virtual a ~1 fps (T026). **Não validado nesta sessão** (host de
-/// desenvolvimento é Windows) — mesma ressalva de `preview::
-/// capture_one_frame_linux` e de T022.
-#[cfg(target_os = "linux")]
-fn spawn_preview_polling_linux(app: AppHandle, session_id: Uuid, device_path: String) {
-    tauri::async_runtime::spawn(async move {
-        loop {
-            let state = app.state::<AppState>();
-            let still_running = matches!(
-                state.stream_manager.state(session_id).await,
-                Some(
-                    SessionState::Streaming | SessionState::Reconnecting | SessionState::SourceLost
-                )
-            );
-            drop(state);
-            if !still_running {
-                break;
-            }
-
-            let path = device_path.clone();
-            let frame =
-                tokio::task::spawn_blocking(move || preview::capture_one_frame_linux(&path))
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok());
-            if let Some((rgba, width, height)) = frame {
-                if let Ok(jpeg) = preview::encode_preview_jpeg(&rgba, width, height) {
-                    let payload = PreviewFrameEvent {
-                        session_id,
-                        jpeg_base64: BASE64.encode(jpeg),
-                    };
-                    let _ = app.emit("preview_frame", payload);
-                }
-            }
-            tokio::time::sleep(PREVIEW_INTERVAL).await;
-        }
-    });
-}
+// O polling de preview do Linux (T026, ~1 fps lendo um frame por vez do
+// device, erros todos silenciados) foi substituído pelo pipeline de preview
+// contínuo do `stream_manager` (`run_preview_pipeline`), que alimenta o
+// mesmo `FrameSink` do Windows — preview E fps passam a valer nas duas
+// plataformas, com falhas visíveis no log.
 
 /// Encerra a sessão e libera a câmera virtual associada (FR-021: nunca
 /// deixar um device virtual órfão).
