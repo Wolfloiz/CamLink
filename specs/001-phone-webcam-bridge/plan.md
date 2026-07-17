@@ -73,8 +73,9 @@ pré-buildado e distribuído no pacote).
 
 **Performance Goals**: latência Android ≤ 70 ms nas duas plataformas, tipicamente
 35–70 ms (SC-002); RTSP ≤ 300 ms; controles
-refletem em < 1 s (SC-004); troca frontal/traseira ≤ 2 s; preview 1 fps com < 5% de
-CPU adicional; sessões de 2 h sem vazamento (SC-005).
+refletem em < 1 s (SC-004); troca frontal/traseira ≤ 2 s; preview ~5 fps em
+miniatura (≤ 640 px de largura) com < 5% de CPU adicional; sessões de 2 h sem
+vazamento (SC-005).
 
 **Constraints**: sem app no celular (premissa de produto); GPL-3.0 (FR-025);
 nenhum dado sai da máquina exceto consumo RTSP configurado (FR-026); RAW limitado
@@ -174,7 +175,7 @@ Ordem herdada do plano legado, com Windows integrado (não mais "Fase 10"):
 | 5.5 | Modos inteligentes | US3 | ambas |
 | 6 | RTSP/IP + cofre de credenciais | US4 | ambas |
 | 7 | Captura RAW (DNG) | US5 | ambas |
-| 8 | Multi-fonte + preview 1 fps | US6 | ambas |
+| 8 | Multi-fonte + preview ~5 fps em miniatura | US6 | ambas |
 | 9 | Empacotamento (.deb/AppImage/AUR + NSIS/MSI) e instaladores | — | ambas |
 
 Cada fase entrega testes antes da implementação (Princípio III) e fecha com o

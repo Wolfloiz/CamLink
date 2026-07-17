@@ -61,11 +61,11 @@ use windows::Win32::Media::DirectShow::{
     IMemAllocator, IMemInputPin, IPin, IPin_Impl, ALLOCATOR_PROPERTIES, FILTER_INFO, FILTER_STATE,
     PINDIR_OUTPUT, PIN_DIRECTION, PIN_INFO, VIDEO_STREAM_CONFIG_CAPS,
 };
-use windows::Win32::Media::IReferenceClock;
 use windows::Win32::Media::KernelStreaming::{IKsPropertySet, IKsPropertySet_Impl};
 use windows::Win32::Media::MediaFoundation::{
     FORMAT_VideoInfo, MEDIATYPE_Video, AM_MEDIA_TYPE, MEDIASUBTYPE_RGB24, VIDEOINFOHEADER,
 };
+use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod, IReferenceClock};
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemAlloc, CoTaskMemFree, CoUninitialize, IClassFactory,
     IClassFactory_Impl, IPersist, IPersist_Impl, COINIT_MULTITHREADED,
@@ -82,10 +82,12 @@ use windows::Win32::System::Registry::{
     REG_OPTION_NON_VOLATILE, REG_SZ,
 };
 use windows::Win32::System::Threading::{
-    CreateMutexW, ReleaseMutex, WaitForSingleObject, INFINITE,
+    CreateMutexW, CreateWaitableTimerExW, ReleaseMutex, SetWaitableTimer, WaitForSingleObject,
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, TIMER_ALL_ACCESS,
 };
 
 use crate::model::{VirtualCamera, VirtualCameraState};
+use crate::virtualcam::pacing::next_frame_deadline;
 use crate::virtualcam::{standby_frame, VcamError, VirtualCameraBackend};
 
 // ---------------------------------------------------------------------------
@@ -411,6 +413,92 @@ impl Inner {
     }
 }
 
+/// Espera até deadlines absolutos com a melhor resolução disponível.
+/// Caminho principal: waitable timer high-resolution (Win10 1803+) — preciso
+/// a ~0,5 ms e local a este handle, sem tocar estado global do processo
+/// hospedeiro (Chrome/OBS). Fallback (criação recusada em Windows antigo):
+/// sleep comum com `timeBeginPeriod(1)` ativo — resolução de timer é GLOBAL
+/// ao processo, por isso só como último recurso e revertida no Drop.
+struct FramePacer {
+    timer: Option<HANDLE>,
+    raised_resolution: bool,
+}
+
+impl FramePacer {
+    fn new() -> Self {
+        // SAFETY: chamada sem pré-condições; o handle é verificado via
+        // Result e fechado no Drop.
+        let timer = unsafe {
+            CreateWaitableTimerExW(
+                None,
+                PCWSTR::null(),
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS.0,
+            )
+        }
+        .ok();
+        let raised_resolution = timer.is_none();
+        if raised_resolution {
+            // SAFETY: winmm sem pré-condições; pareado com o timeEndPeriod
+            // do Drop.
+            unsafe {
+                let _ = timeBeginPeriod(1);
+            }
+            tracing::warn!(
+                "waitable timer high-resolution indisponível — fallback global timeBeginPeriod(1)"
+            );
+        }
+        Self {
+            timer,
+            raised_resolution,
+        }
+    }
+
+    /// Bloqueia a thread até `deadline`; retorna direto se já passou.
+    fn wait_until(&self, deadline: Instant) {
+        let now = Instant::now();
+        let Some(remaining) = deadline.checked_duration_since(now) else {
+            return;
+        };
+        if remaining.is_zero() {
+            return;
+        }
+        if let Some(timer) = self.timer {
+            // Due time negativo = tempo relativo, em unidades de 100 ns.
+            let due = -i64::try_from(remaining.as_nanos() / 100).unwrap_or(i64::MAX);
+            // SAFETY: `timer` é um handle válido criado em `new`; `due`
+            // vive na stack durante toda a chamada.
+            let armed = unsafe { SetWaitableTimer(timer, &due, 0, None, None, false) };
+            if armed.is_ok() {
+                // SAFETY: handle válido; o timer sempre expira, então
+                // INFINITE não trava.
+                unsafe {
+                    let _ = WaitForSingleObject(timer, INFINITE);
+                }
+                return;
+            }
+        }
+        thread::sleep(remaining);
+    }
+}
+
+impl Drop for FramePacer {
+    fn drop(&mut self) {
+        if let Some(timer) = self.timer.take() {
+            // SAFETY: handle criado em `new`, fechado exatamente uma vez.
+            unsafe {
+                let _ = CloseHandle(timer);
+            }
+        }
+        if self.raised_resolution {
+            // SAFETY: pareia o timeBeginPeriod(1) de `new`.
+            unsafe {
+                let _ = timeEndPeriod(1);
+            }
+        }
+    }
+}
+
 fn worker_loop(inner: Arc<Inner>) {
     // SAFETY: toda thread que participa de COM precisa se inicializar antes
     // de qualquer chamada COM, mesmo chamadas "cruas" sem marshaling como
@@ -432,9 +520,10 @@ fn worker_loop(inner: Arc<Inner>) {
         let mut last_update = Instant::now() - STALE_TIMEOUT - Duration::from_secs(1);
         let mut buf: Vec<u8> = Vec::new();
         let mut iter: i64 = 0;
+        let pacer = FramePacer::new();
+        let mut deadline = Instant::now();
 
         while inner.running.load(Ordering::SeqCst) {
-            let loop_start = Instant::now();
             let frame_period = Duration::from_secs_f64(1.0 / f64::from(fps.max(1)));
 
             let mut have_frame = false;
@@ -458,16 +547,29 @@ fn worker_loop(inner: Arc<Inner>) {
                 iter += 1;
             }
 
-            let spent = loop_start.elapsed();
-            if spent < frame_period {
-                thread::sleep(frame_period - spent);
-            }
+            // Deadline ABSOLUTO (`next_frame_deadline`): o erro de
+            // granularidade de uma espera não se acumula — o antigo
+            // `thread::sleep(period - spent)` somava os ~15,6 ms do timer
+            // do Windows a cada iteração e derrubava 30 fps para ~15.
+            deadline = next_frame_deadline(deadline, frame_period, Instant::now());
+            pacer.wait_until(deadline);
         }
     }
 
     // SAFETY: contrabalança o CoInitializeEx no início desta thread.
     unsafe {
         CoUninitialize();
+    }
+}
+
+/// Converte RGBA→RGB24 lendo de `src` para `dst` (buffer reutilizado entre
+/// frames — o caminho quente da entrega não aloca; o antigo
+/// `frame.to_vec()` custava ~8 MB de alloc por frame a 1080p).
+fn convert_rgba_to_rgb24_into(src: &[u8], dst: &mut Vec<u8>) {
+    dst.clear();
+    dst.reserve(src.len() / 4 * 3);
+    for px in src.chunks_exact(4) {
+        dst.extend_from_slice(&px[..3]);
     }
 }
 
@@ -1282,6 +1384,9 @@ struct ManagedCamera {
     hub: FrameHub,
     resolution: (u32, u32),
     fps: u32,
+    // Buffer RGB24 reutilizado entre frames — `feed_frame` roda no caminho
+    // quente da entrega (30x/s, ~6 MB a 1080p) e não deve alocar por frame.
+    rgb24_scratch: Vec<u8>,
 }
 
 /// Backend real de câmera virtual via o filtro DirectShow próprio. v1
@@ -1343,6 +1448,7 @@ impl VirtualCameraBackend for DShowBackend {
             hub,
             resolution,
             fps,
+            rgb24_scratch: Vec::new(),
         });
         Ok(camera)
     }
@@ -1364,13 +1470,12 @@ impl VirtualCameraBackend for DShowBackend {
                 frame.len()
             )));
         }
-        let mut rgb24 = frame.to_vec();
-        convert_rgba_to_rgb24_in_place(&mut rgb24);
+        convert_rgba_to_rgb24_into(frame, &mut managed.rgb24_scratch);
         managed.hub.write_frame(
             managed.resolution.0,
             managed.resolution.1,
             managed.fps,
-            &rgb24,
+            &managed.rgb24_scratch,
             true,
         );
         managed.camera.state = VirtualCameraState::Live;

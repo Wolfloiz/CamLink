@@ -21,8 +21,8 @@
 #![cfg(target_os = "linux")]
 
 use camlink_lib::virtualcam::v4l2::{
-    build_add_args, ctl_supports_dynamic_add, detect_secure_boot_block, parse_added_device,
-    parse_ctl_version, parse_list_output,
+    build_add_args, ctl_supports_dynamic_add, detect_secure_boot_block, find_reusable_device,
+    parse_added_device, parse_ctl_version, parse_list_output, LoopbackDevice,
 };
 
 // ---------------------------------------------------------------------------
@@ -96,6 +96,48 @@ fn empty_list_output_yields_no_devices() {
 fn list_output_ignores_blank_lines() {
     let stdout = "/dev/video0  \t/dev/video0  \tCamLink Android\n\n";
     assert_eq!(parse_list_output(stdout).len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// find_reusable_device — device estável entre sessões: consumidores
+// (OBS/Meet) mantêm a referência ao MESMO /dev/videoN entre trocas de
+// câmera e restarts; criar um device por sessão fazia o Chrome listar
+// duplicatas mortas ("câmera indisponível") e o OBS congelar no último
+// frame do device deletado.
+// ---------------------------------------------------------------------------
+
+fn dev(path: &str, name: &str) -> LoopbackDevice {
+    LoopbackDevice {
+        output: path.to_string(),
+        capture: path.to_string(),
+        name: name.to_string(),
+    }
+}
+
+#[test]
+fn reuses_first_device_with_matching_label() {
+    let devices = vec![
+        dev("/dev/video2", "Outra Fonte"),
+        dev("/dev/video5", "CamLink Android"),
+        dev("/dev/video6", "CamLink Android"),
+    ];
+    assert_eq!(
+        find_reusable_device(&devices, "CamLink Android"),
+        Some("/dev/video5".to_string())
+    );
+}
+
+#[test]
+fn no_device_with_matching_label_yields_none() {
+    let devices = vec![dev("/dev/video2", "Outra Fonte")];
+    assert_eq!(find_reusable_device(&devices, "CamLink Android"), None);
+    assert_eq!(find_reusable_device(&[], "CamLink Android"), None);
+}
+
+#[test]
+fn label_match_is_exact_not_prefix() {
+    let devices = vec![dev("/dev/video2", "CamLink Android (old)")];
+    assert_eq!(find_reusable_device(&devices, "CamLink Android"), None);
 }
 
 // ---------------------------------------------------------------------------

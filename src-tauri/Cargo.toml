@@ -17,6 +17,16 @@ default-run = "camlink"
 name = "camlink_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Loops de pixel (RGBA→RGB, encode JPEG do crate `image`) em opt-level 0 são
+# ordens de grandeza mais lentos e distorcem qualquer avaliação de fluidez em
+# `cargo tauri dev`. Deps sobem para 3 (é onde mora o custo); nosso código fica
+# em 1 para manter compile rápido. Avaliação de performance vale só em release.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

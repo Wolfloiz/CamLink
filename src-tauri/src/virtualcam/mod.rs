@@ -4,6 +4,9 @@
 
 #[cfg(target_os = "windows")]
 pub mod dshow;
+// Cross-platform de propósito: a lógica de pacing do filtro DirectShow é
+// pura para ser testável no Linux (onde dshow.rs nem compila).
+pub mod pacing;
 #[cfg(target_os = "linux")]
 pub mod v4l2;
 

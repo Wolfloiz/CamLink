@@ -82,6 +82,19 @@ pub fn parse_list_output(stdout: &str) -> Vec<LoopbackDevice> {
         .collect()
 }
 
+/// Escolhe um device loopback existente com o label do CamLink para reuso
+/// (primeiro match exato). Sessões novas reaproveitam o MESMO `/dev/videoN`:
+/// consumidores (OBS/Meet) mantêm a referência entre trocas de câmera e
+/// restarts do app — criar um device por sessão fazia o Chrome acumular
+/// duplicatas mortas ("câmera indisponível", exclusive_caps sem writer) e o
+/// OBS congelar no último frame do device deletado.
+pub fn find_reusable_device(devices: &[LoopbackDevice], label: &str) -> Option<String> {
+    devices
+        .iter()
+        .find(|d| d.name == label)
+        .map(|d| d.output.clone())
+}
+
 /// Parseia a versão de `v4l2loopback-ctl --version`/`-v`
 /// (`<progname> v<major>.<minor>.<bugfix>`).
 pub fn parse_ctl_version(stdout: &str) -> Option<(u32, u32, u32)> {
@@ -206,21 +219,58 @@ impl VirtualCameraBackend for V4l2Backend {
         resolution: (u32, u32),
         fps: u32,
     ) -> Result<VirtualCamera, VcamError> {
-        let output = Command::new(CTL_BIN)
-            .args(build_add_args(label))
+        // Reuso de device estável (ver `find_reusable_device`): duplicatas
+        // do mesmo label (sessões antigas mortas sem cleanup) são removidas
+        // best-effort — `delete` falha com EBUSY se alguém estiver usando,
+        // o que já serve de guarda para uma segunda instância viva.
+        let existing = Command::new(CTL_BIN)
+            .arg("list")
             .output()
-            .map_err(|e| VcamError::Backend(format!("falha ao executar v4l2loopback-ctl: {e}")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if let Some(err) = detect_secure_boot_block(&stderr) {
-                return Err(VcamError::Backend(err.msg));
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| parse_list_output(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default();
+        let reusable = find_reusable_device(&existing, label);
+        for extra in existing
+            .iter()
+            .filter(|d| d.name == label && Some(&d.output) != reusable.as_ref())
+        {
+            match Command::new(CTL_BIN)
+                .args(["delete", &extra.output])
+                .output()
+            {
+                Ok(o) if o.status.success() => {
+                    tracing::info!(path = %extra.output, "device v4l2 duplicado removido");
+                }
+                _ => {
+                    tracing::debug!(path = %extra.output, "duplicata em uso ou não removível — mantida")
+                }
             }
-            return Err(VcamError::Backend(format!(
-                "v4l2loopback-ctl add falhou: {stderr}"
-            )));
         }
-        let device_path = parse_added_device(&String::from_utf8_lossy(&output.stdout))
-            .ok_or_else(|| VcamError::Backend("saída inesperada de v4l2loopback-ctl add".into()))?;
+
+        let device_path = if let Some(path) = reusable {
+            tracing::info!(%path, "reusando device v4l2 existente");
+            path
+        } else {
+            let output = Command::new(CTL_BIN)
+                .args(build_add_args(label))
+                .output()
+                .map_err(|e| {
+                    VcamError::Backend(format!("falha ao executar v4l2loopback-ctl: {e}"))
+                })?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if let Some(err) = detect_secure_boot_block(&stderr) {
+                    return Err(VcamError::Backend(err.msg));
+                }
+                return Err(VcamError::Backend(format!(
+                    "v4l2loopback-ctl add falhou: {stderr}"
+                )));
+            }
+            parse_added_device(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+                VcamError::Backend("saída inesperada de v4l2loopback-ctl add".into())
+            })?
+        };
 
         let ffmpeg = Self::spawn_ffmpeg(&device_path, resolution, fps)?;
 
@@ -287,16 +337,12 @@ impl VirtualCameraBackend for V4l2Backend {
         let device_path = managed.camera.backend_path.clone();
         drop(managed); // encerra o ffmpeg (Drop de ManagedCamera)
 
-        let output = Command::new(CTL_BIN)
-            .args(["delete", &device_path])
-            .output()
-            .map_err(|e| VcamError::Backend(format!("falha ao executar v4l2loopback-ctl: {e}")))?;
-        if !output.status.success() {
-            return Err(VcamError::Backend(format!(
-                "v4l2loopback-ctl delete falhou: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
+        // O device NÃO é deletado: ele é o alvo estável que consumidores
+        // (OBS/Meet) mantêm aberto entre sessões e trocas de câmera — a
+        // próxima sessão o reusa (`find_reusable_device`) e o writer novo
+        // faz os frames voltarem no MESMO device. Equivale ao filtro
+        // DirectShow do Windows, que permanece registrado entre sessões.
+        tracing::info!(path = %device_path, "sessão encerrada; device v4l2 mantido para reuso");
         Ok(())
     }
 

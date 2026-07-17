@@ -23,6 +23,9 @@ Discord). GPL-3.0.
 - Sem `unwrap()` em caminho falível; `tracing` estruturado; `unsafe` só FFI com
   `// SAFETY:`
 - Credenciais apenas no cofre do SO (keyring); nada sai da máquina
+- **Avaliação de performance só em build release** — `cargo tauri dev` usa o
+  perfil dev (opt-level 1; deps em 3, ver `src-tauri/Cargo.toml`), suficiente
+  para desenvolvimento mas não para medir fps/latência
 
 ## Feature ativa
 

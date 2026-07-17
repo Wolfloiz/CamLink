@@ -40,7 +40,11 @@ use virtualcam::v4l2::V4l2Backend;
 
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SESSION_STATE_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const PREVIEW_INTERVAL: Duration = Duration::from_secs(1);
+/// Cadência da miniatura de preview (~5 fps): suficiente para enquadrar a
+/// câmera sem competir com o stream principal — o frame é pequeno
+/// (`preview_dimensions`, ≤640 px) e o encode roda fora do hot path
+/// (`spawn_preview_encoder`).
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(200);
 const VIRTUAL_CAMERA_LABEL: &str = "CamLink Android";
 /// EMA aplicada em `SessionStats.fps` — janela efetiva ~= POLL_INTERVAL /
 /// (1 - FPS_SMOOTHING) ≈ 1,25s, escolhida pra cobrir o período de rajada
@@ -157,7 +161,14 @@ async fn start_stream(
     let vcam_target = virtual_camera.backend_path.clone();
     let vcam_id = virtual_camera.id;
     let vcam_handle = Arc::clone(&state.vcam);
-    let (width, height) = config.resolution;
+    // O preview trafega em miniatura (`preview_dimensions`): no Linux o
+    // leitor ffmpeg já entrega nesse tamanho (mesma função gera o `scale=`);
+    // no Windows os frames chegam full-res do decode do socket scrcpy e são
+    // reduzidos no sink antes de publicar. As dims viajam junto com o frame
+    // até o encoder: `encode_preview_jpeg` valida len×dims, e uma
+    // divergência mataria o preview em silêncio.
+    let source_dims = config.resolution;
+    let preview_dims = preview::preview_dimensions(source_dims);
 
     // T026 (FR-023): a sessão ainda não existe no momento em que o sink é
     // montado (o id só nasce dentro de `stream_manager.start()`), então o
@@ -165,15 +176,32 @@ async fn start_stream(
     // antes disso (janela muito curta) simplesmente não geram preview,
     // aceitável por serem descartáveis por natureza.
     let session_id_cell: Arc<StdMutex<Option<Uuid>>> = Arc::new(StdMutex::new(None));
-    let session_id_for_sink = Arc::clone(&session_id_cell);
     let preview_last = Arc::new(StdMutex::new(Instant::now() - PREVIEW_INTERVAL));
-    let app_for_preview = app.clone();
     // `SessionStats.fps` nunca era atualizado (ficava travado no 0.0 do
     // valor inicial) — contamos aqui, fora do `stream_manager` (que não
     // sabe nada sobre frames, só sobre o processo do backend), e
     // computamos fps por delta no emissor de `session_state` abaixo.
     let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let frame_count_for_sink = Arc::clone(&frame_count);
+
+    // T1.3: o sink publica o frame cru (miniatura) e segue; o encode JPEG —
+    // que em debug/1080p chegava a centenas de ms e virava backpressure no
+    // pipe do ffmpeg — roda na task abaixo, sempre sobre o frame mais
+    // recente. O sender morre junto com o sink (abort do pipeline no stop),
+    // encerrando a task.
+    let (preview_tx, preview_rx) = tokio::sync::watch::channel(None);
+    let app_for_preview = app.clone();
+    let session_id_for_preview = Arc::clone(&session_id_cell);
+    spawn_preview_encoder(preview_rx, move |jpeg| {
+        let Some(session_id) = *session_id_for_preview.lock().unwrap() else {
+            return;
+        };
+        let payload = PreviewFrameEvent {
+            session_id,
+            jpeg_base64: BASE64.encode(jpeg),
+        };
+        let _ = app_for_preview.emit("preview_frame", payload);
+    });
 
     let sink: FrameSink = Arc::new(move |frame: &[u8]| {
         frame_count_for_sink.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -190,9 +218,6 @@ async fn start_stream(
         }
         #[cfg(not(target_os = "windows"))]
         let _ = (&vcam_handle, &vcam_id);
-        let Some(session_id) = *session_id_for_sink.lock().unwrap() else {
-            return;
-        };
         let due = {
             let mut last = preview_last.lock().unwrap();
             let due = last.elapsed() >= PREVIEW_INTERVAL;
@@ -204,12 +229,24 @@ async fn start_stream(
         if !due {
             return;
         }
-        if let Ok(jpeg) = preview::encode_preview_jpeg(frame, width, height) {
-            let payload = PreviewFrameEvent {
-                session_id,
-                jpeg_base64: BASE64.encode(jpeg),
-            };
-            let _ = app_for_preview.emit("preview_frame", payload);
+        let (pw, ph) = preview_dims;
+        let published: Result<Vec<u8>, String>;
+        #[cfg(target_os = "windows")]
+        {
+            published = preview::downsample_rgba(frame, source_dims.0, source_dims.1, pw, ph);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = source_dims;
+            published = Ok(frame.to_vec());
+        }
+        match published {
+            Ok(rgba) => {
+                let _ = preview_tx.send(Some((rgba, pw, ph)));
+            }
+            // Preview é descartável (FR-023), mas a falha precisa aparecer:
+            // um frame fora da geometria esperada (ex.: rotação) cai aqui.
+            Err(e) => tracing::warn!(error = %e, "downsample do preview falhou"),
         }
     });
 
@@ -251,12 +288,6 @@ async fn start_stream(
     })
 }
 
-// O polling de preview do Linux (T026, ~1 fps lendo um frame por vez do
-// device, erros todos silenciados) foi substituído pelo pipeline de preview
-// contínuo do `stream_manager` (`run_preview_pipeline`), que alimenta o
-// mesmo `FrameSink` do Windows — preview E fps passam a valer nas duas
-// plataformas, com falhas visíveis no log.
-
 /// Encerra a sessão e libera a câmera virtual associada (FR-021: nunca
 /// deixar um device virtual órfão).
 #[tauri::command]
@@ -288,6 +319,30 @@ struct SessionStateEvent {
 struct PreviewFrameEvent {
     session_id: Uuid,
     jpeg_base64: String,
+}
+
+/// Task de encode do preview (T1.3/FR-023): consome o frame RGBA mais
+/// recente publicado pelo sink (canal `watch` — sem fila; frames que chegam
+/// enquanto um encode roda substituem o anterior) e entrega o JPEG ao
+/// `emit`. Termina sozinha quando o sender some — o sink é dropado junto com
+/// o pipeline no stop da sessão.
+fn spawn_preview_encoder(
+    mut rx: tokio::sync::watch::Receiver<Option<(Vec<u8>, u32, u32)>>,
+    emit: impl Fn(Vec<u8>) + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while rx.changed().await.is_ok() {
+            let frame = rx.borrow_and_update().clone();
+            let Some((rgba, w, h)) = frame else { continue };
+            match preview::encode_preview_jpeg(&rgba, w, h) {
+                Ok(jpeg) => emit(jpeg),
+                // Preview é descartável (FR-023): falha aqui nunca derruba o
+                // stream, mas precisa aparecer no log — era o silêncio que
+                // escondia o preview morto no Linux.
+                Err(e) => tracing::warn!(error = %e, "encode de preview falhou"),
+            }
+        }
+    })
 }
 
 /// Emite `session_state` a cada tick (`SESSION_STATE_POLL_INTERVAL`) até a
@@ -420,4 +475,44 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T1.3 (FR-023): o encode de preview roda numa task própria alimentada
+    /// por um canal `watch` (sempre o frame mais recente, sem fila) — o loop
+    /// de leitura publica e segue, nunca espera pelo encode.
+    #[tokio::test]
+    async fn preview_encoder_emits_jpeg_for_published_frame() {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let (jpeg_tx, mut jpeg_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _handle = spawn_preview_encoder(rx, move |jpeg| {
+            let _ = jpeg_tx.send(jpeg);
+        });
+        let rgba = [10u8, 20, 30, 255].repeat(4 * 4);
+        tx.send(Some((rgba, 4, 4))).expect("receiver vivo");
+        let jpeg = tokio::time::timeout(Duration::from_secs(2), jpeg_rx.recv())
+            .await
+            .expect("encoder deve emitir dentro do timeout")
+            .expect("canal de saída aberto");
+        assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "JPEG começa com SOI");
+    }
+
+    /// Lifecycle (stop/start repetido): quando o pipeline é abortado no stop
+    /// o sink some, o sender do watch é dropado e a task de encode termina
+    /// sozinha — nada vaza entre sessões.
+    #[tokio::test]
+    async fn preview_encoder_exits_when_sink_is_dropped() {
+        for _ in 0..3 {
+            let (tx, rx) = tokio::sync::watch::channel(None);
+            let handle = spawn_preview_encoder(rx, |_jpeg| {});
+            drop(tx);
+            tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .expect("task deve terminar quando o sender some")
+                .expect("task não deve panicar");
+        }
+    }
 }

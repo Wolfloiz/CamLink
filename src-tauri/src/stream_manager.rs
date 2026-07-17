@@ -189,14 +189,18 @@ pub fn build_scrcpy_client_args(config: &StreamConfig, v4l2_device: &str) -> Vec
     ]
 }
 
-/// Argumentos do ffmpeg que lê o lado de captura do device v4l2loopback e
-/// devolve frames RGBA pelo stdout (preview/fps no Linux — o scrcpy entrega
-/// os frames direto ao device via `--v4l2-sink`, então a única fonte de
-/// verdade do que a câmera virtual está exibindo é o próprio device). O
-/// `scale` garante frames do tamanho da configuração mesmo se o writer
-/// negociar outra geometria (ex.: rotação do device).
+/// Argumentos do ffmpeg que tira UM snapshot RGBA do lado de captura do
+/// device v4l2loopback (preview no Linux — o scrcpy entrega os frames
+/// direto ao device via `--v4l2-sink`, então a única fonte de verdade do
+/// que a câmera virtual está exibindo é o próprio device). `-frames:v 1` é
+/// essencial: o v4l2loopback (0.15, exclusive_caps=1) só admite UM leitor
+/// streamando por vez — confirmado em hardware, um segundo leitor recebe
+/// EBUSY — então o preview NÃO pode segurar o device aberto, senão OBS/Meet
+/// veem "câmera indisponível". O `scale` reduz ao tamanho da miniatura
+/// (`preview_dimensions` — mesma função usada por quem consome o frame) e
+/// absorve o writer negociar outra geometria (ex.: rotação do device).
 pub fn build_v4l2_preview_args(device: &str, resolution: (u32, u32)) -> Vec<String> {
-    let (w, h) = resolution;
+    let (pw, ph) = crate::preview::preview_dimensions(resolution);
     vec![
         "-loglevel".to_string(),
         "error".to_string(),
@@ -205,7 +209,9 @@ pub fn build_v4l2_preview_args(device: &str, resolution: (u32, u32)) -> Vec<Stri
         "-i".to_string(),
         device.to_string(),
         "-vf".to_string(),
-        format!("scale={w}:{h}"),
+        format!("scale={pw}:{ph}"),
+        "-frames:v".to_string(),
+        "1".to_string(),
         "-f".to_string(),
         "rawvideo".to_string(),
         "-pix_fmt".to_string(),
@@ -632,28 +638,87 @@ async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, fps: u32, s
         }
 
         let frame_bytes = session.width as usize * session.height as usize * 4;
+        // Read (decode) e sink (cópia para a memória compartilhada do
+        // filtro) desacoplados por uma célula latest-frame: o loop de
+        // leitura publica com `mem::swap` O(1) e volta imediatamente ao
+        // stdout do ffmpeg; a task de entrega consome sempre o frame mais
+        // recente. Se a entrega ficar para trás, frames intermediários são
+        // descartados (drop-to-latest, contado em `dropped_count`) — nunca
+        // enfileirados, que é o que virava latência crescente. Um
+        // `watch<Vec<u8>>` faria o mesmo papel clonando ~8 MB por frame; o
+        // swap devolve o buffer anterior para reuso. Consequência para
+        // `SessionStats.fps`: o sink conta frames ENTREGUES à câmera
+        // virtual (não decodificados) — é a taxa que o consumidor vê.
+        let latest_cell: Arc<std::sync::Mutex<(Vec<u8>, bool)>> =
+            Arc::new(std::sync::Mutex::new((Vec::new(), false)));
+        let frame_ready = Arc::new(Notify::new());
+
+        let delivery_cell = Arc::clone(&latest_cell);
+        let delivery_ready = Arc::clone(&frame_ready);
+        let delivery_task = tokio::spawn(async move {
+            let mut out: Vec<u8> = Vec::new();
+            let mut delivered_count: u64 = 0;
+            loop {
+                delivery_ready.notified().await;
+                let fresh = {
+                    let mut cell = delivery_cell.lock().unwrap_or_else(|p| p.into_inner());
+                    let fresh = cell.1;
+                    if fresh {
+                        std::mem::swap(&mut out, &mut cell.0);
+                        cell.1 = false;
+                    }
+                    fresh
+                };
+                if !fresh {
+                    continue;
+                }
+                let sink_start = tokio::time::Instant::now();
+                sink(&out);
+                let sink_elapsed = sink_start.elapsed();
+                delivered_count += 1;
+                if delivered_count <= 5 || delivered_count.is_multiple_of(30) {
+                    tracing::info!(
+                        delivered_count,
+                        sink_ms = sink_elapsed.as_millis(),
+                        "frame entregue à câmera virtual"
+                    );
+                }
+            }
+        });
+
+        let reader_cell = Arc::clone(&latest_cell);
+        let reader_ready = Arc::clone(&frame_ready);
         let reader_task = tokio::spawn(async move {
             let mut buf = vec![0u8; frame_bytes];
             let mut decoded_count: u64 = 0;
+            let mut dropped_count: u64 = 0;
             loop {
-                // DIAGNÓSTICO TEMPORÁRIO: fps travado em ~15 (metade do
-                // default de 30) — precisa isolar se o teto é decode+
-                // conversão do ffmpeg (dentro de `read_exact`) ou a cópia
-                // pra memória compartilhada do DirectShow (`sink`), já que
-                // as duas rodam em série aqui.
                 let read_start = tokio::time::Instant::now();
                 match ffmpeg_stdout.read_exact(&mut buf).await {
                     Ok(_) => {
                         let read_elapsed = read_start.elapsed();
                         decoded_count += 1;
-                        let sink_start = tokio::time::Instant::now();
-                        sink(&buf);
-                        let sink_elapsed = sink_start.elapsed();
+                        {
+                            let mut cell = reader_cell.lock().unwrap_or_else(|p| p.into_inner());
+                            std::mem::swap(&mut buf, &mut cell.0);
+                            if cell.1 {
+                                // O frame anterior nunca foi entregue —
+                                // descartado em favor deste.
+                                dropped_count += 1;
+                            }
+                            cell.1 = true;
+                        }
+                        reader_ready.notify_one();
+                        // O swap devolve o buffer já consumido (ou vazio,
+                        // nas primeiras voltas) para o próximo read_exact.
+                        if buf.len() != frame_bytes {
+                            buf.resize(frame_bytes, 0);
+                        }
                         if decoded_count <= 5 || decoded_count.is_multiple_of(30) {
                             tracing::info!(
                                 decoded_count,
+                                dropped_count,
                                 read_ms = read_elapsed.as_millis(),
-                                sink_ms = sink_elapsed.as_millis(),
                                 "frame decodificado pelo ffmpeg"
                             );
                         }
@@ -662,7 +727,7 @@ async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, fps: u32, s
                         // Antes esse `while ... .is_ok()` saía em silêncio;
                         // não dava pra saber se o ffmpeg nunca chegou a
                         // produzir nada (0 frames) ou parou no meio.
-                        tracing::warn!(decoded_count, error = %e, "leitura do stdout do ffmpeg encerrada");
+                        tracing::warn!(decoded_count, dropped_count, error = %e, "leitura do stdout do ffmpeg encerrada");
                         break;
                     }
                 }
@@ -757,6 +822,7 @@ async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, fps: u32, s
         drop(ffmpeg_stdin);
         let _ = ffmpeg.wait().await;
         reader_task.abort();
+        delivery_task.abort();
         Ok(())
     }
     .await;
@@ -818,11 +884,20 @@ async fn maybe_spawn_video_pipeline(
     }
 }
 
-/// Lê frames RGBA do lado de captura do device v4l2loopback e entrega ao
-/// `FrameSink` (Linux). Reabre o leitor quando a leitura termina — o writer
-/// (scrcpy) renegocia o formato do device ao conectar/reconectar, o que
-/// derruba um leitor já aberto; a task só morre por `abort()` (stop da
-/// sessão ou substituição por um pipeline novo).
+/// Intervalo entre snapshots de preview no Linux. Entre um snapshot e outro
+/// o device fica LIVRE — o slot único de leitura do v4l2loopback pertence
+/// ao consumidor real (OBS/Meet); o preview é descartável (FR-023).
+#[cfg(target_os = "linux")]
+const PREVIEW_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Tira snapshots RGBA do lado de captura do device v4l2loopback e entrega
+/// ao `FrameSink` (Linux). Cada snapshot abre o device, lê UM frame e fecha
+/// (`build_v4l2_preview_args`): o v4l2loopback só admite um leitor
+/// streamando por vez, então segurar o device aberto bloqueava OBS/Meet com
+/// "câmera indisponível". Quando um consumidor está com o slot (EBUSY) ou o
+/// writer ainda não conectou, o snapshot falha e é simplesmente pulado —
+/// logado uma vez por transição, não por tentativa. A task só morre por
+/// `abort()` (stop da sessão ou substituição por um pipeline novo).
 #[cfg(target_os = "linux")]
 async fn run_preview_pipeline(
     ffmpeg_path: PathBuf,
@@ -832,65 +907,48 @@ async fn run_preview_pipeline(
 ) {
     use tokio::io::AsyncReadExt;
 
-    let (w, h) = resolution;
+    // Mesma fonte de verdade do `scale=` nos args do ffmpeg — se divergisse,
+    // o `read_exact` abaixo desalinharia em silêncio.
+    let (w, h) = crate::preview::preview_dimensions(resolution);
     let frame_bytes = w as usize * h as usize * 4;
+    let mut buf = vec![0u8; frame_bytes];
+    let mut had_frame = false;
     loop {
-        let result: Result<u64, AppError> = async {
+        let snapshot: Result<(), String> = async {
             let mut ffmpeg = Command::new(&ffmpeg_path)
                 .args(build_v4l2_preview_args(&device, resolution))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
+                .stderr(Stdio::null())
                 .kill_on_drop(true)
                 .spawn()
-                .map_err(|e| {
-                    AppError::new(
-                        "preview_spawn_failed",
-                        format!("Falha ao iniciar ffmpeg do preview: {e}"),
-                    )
-                })?;
-            let mut stdout = ffmpeg.stdout.take().ok_or_else(|| {
-                AppError::new(
-                    "preview_io_error",
-                    "stdout do ffmpeg de preview indisponível",
-                )
-            })?;
-            if let Some(stderr) = ffmpeg.stderr.take() {
-                tokio::spawn(async move {
-                    let mut lines = BufReader::new(stderr).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        tracing::warn!(stderr = %line, "ffmpeg de preview stderr");
-                    }
-                });
-            }
-
-            let mut buf = vec![0u8; frame_bytes];
-            let mut frames: u64 = 0;
-            loop {
-                match stdout.read_exact(&mut buf).await {
-                    Ok(_) => {
-                        frames += 1;
-                        if frames == 1 {
-                            tracing::info!(%device, "pipeline de preview recebendo frames");
-                        }
-                        sink(&buf);
-                    }
-                    Err(e) => {
-                        tracing::warn!(frames, error = %e, "leitura do preview encerrada");
-                        break;
-                    }
-                }
-            }
-            let _ = ffmpeg.start_kill();
+                .map_err(|e| format!("falha ao iniciar ffmpeg do preview: {e}"))?;
+            let mut stdout = ffmpeg
+                .stdout
+                .take()
+                .ok_or_else(|| "stdout do ffmpeg de preview indisponível".to_string())?;
+            let read = stdout.read_exact(&mut buf).await;
             let _ = ffmpeg.wait().await;
-            Ok(frames)
+            read.map(|_| ()).map_err(|e| format!("sem frame: {e}"))
         }
         .await;
 
-        if let Err(err) = result {
-            tracing::warn!(code = %err.code, msg = %err.msg, "pipeline de preview falhou");
+        match snapshot {
+            Ok(()) => {
+                if !had_frame {
+                    tracing::info!(%device, "preview capturando snapshots");
+                    had_frame = true;
+                }
+                sink(&buf);
+            }
+            Err(reason) => {
+                if had_frame {
+                    tracing::info!(%device, %reason, "preview sem acesso ao device (consumidor ativo ou writer fora) — cedendo o slot");
+                    had_frame = false;
+                }
+            }
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(PREVIEW_SNAPSHOT_INTERVAL).await;
     }
 }
 
@@ -1308,17 +1366,22 @@ mod tests {
         }
     }
 
-    /// O leitor de preview precisa devolver exatamente frames RGBA no
-    /// tamanho da configuração (o consumidor faz `read_exact(w*h*4)`), lendo
-    /// do device v4l2 — e escalando, porque quem define o formato do device
-    /// é o writer (scrcpy), não nós.
+    /// O leitor de preview devolve frames RGBA no tamanho da MINIATURA
+    /// (`preview_dimensions`, não a resolução da config — banda ~10x menor),
+    /// lendo do device v4l2 e escalando com `scale=PW:PH` explícito: quem
+    /// define o formato do device é o writer (scrcpy), e o consumidor faz
+    /// `read_exact(pw*ph*4)` — qualquer divergência de arredondamento
+    /// desalinharia a leitura em silêncio.
     #[test]
-    fn preview_args_read_device_and_emit_rgba_at_config_size() {
+    fn preview_args_read_device_and_emit_rgba_at_preview_size() {
         let args = build_v4l2_preview_args("/dev/video9", (1280, 720));
         let joined = args.join(" ");
         assert!(joined.contains("-f v4l2 -i /dev/video9"), "{joined}");
-        assert!(joined.contains("-vf scale=1280:720"), "{joined}");
+        assert!(joined.contains("-vf scale=640:360"), "{joined}");
         assert!(joined.contains("-pix_fmt rgba"), "{joined}");
+        // Um frame por invocação: o preview não pode segurar o único slot
+        // de leitura do v4l2loopback (EBUSY para OBS/Meet).
+        assert!(joined.contains("-frames:v 1"), "{joined}");
         assert!(
             joined.ends_with("pipe:1"),
             "saída deve ser o stdout: {joined}"
@@ -1327,5 +1390,16 @@ mod tests {
         let dev = args.iter().position(|a| a == "/dev/video9");
         let pipe = args.iter().position(|a| a == "pipe:1");
         assert!(dev < pipe, "{joined}");
+    }
+
+    /// `SessionStats.fps` é computado contando os frames que o sink recebe —
+    /// um filtro `fps=` no leitor mascararia a taxa real do device.
+    #[test]
+    fn preview_args_never_resample_frame_rate() {
+        let args = build_v4l2_preview_args("/dev/video9", (1920, 1080));
+        assert!(
+            !args.iter().any(|a| a.contains("fps=")),
+            "leitor de preview não pode reamostrar a taxa: {args:?}"
+        );
     }
 }
