@@ -526,23 +526,31 @@ fn worker_loop(inner: Arc<Inner>) {
         while inner.running.load(Ordering::SeqCst) {
             let frame_period = Duration::from_secs_f64(1.0 / f64::from(fps.max(1)));
 
-            let mut have_frame = false;
+            let mut have_new_frame = false;
             if let Some(hub) = hub.as_ref() {
                 if let Some(header) = hub.read_if_newer(last_seq, &mut buf) {
                     last_seq = header.sequence;
                     resolution = (header.width, header.height);
                     fps = header.fps.max(1);
                     last_update = Instant::now();
-                    have_frame = true;
+                    have_new_frame = true;
                 }
             }
-            if !have_frame && last_update.elapsed() > STALE_TIMEOUT {
+            if !have_new_frame && last_update.elapsed() > STALE_TIMEOUT {
                 buf = standby_frame(resolution, "Aguardando CamLink...");
                 convert_rgba_to_rgb24_in_place(&mut buf);
-                have_frame = true;
             }
 
-            if have_frame {
+            // Empurra uma amostra em TODO tick de pacing, mesmo sem frame
+            // novo — repetindo o último `buf` válido (real ou standby) em
+            // vez de pular o tick. `iter` (e o PTS derivado dele em
+            // `push_sample`) só avança quando há push; um tick pulado
+            // atrasava o relógio de apresentação informado ao consumidor
+            // permanentemente (nunca se recupera sozinho), acumulando
+            // delay e entregando frames em cadência irregular — percebido
+            // como frame perdido/"borrão" em movimento rápido quando o
+            // decode não acompanha o fps alvo.
+            if !buf.is_empty() {
                 push_sample(&mem_input, &allocator, &buf, resolution, fps, iter);
                 iter += 1;
             }
@@ -565,24 +573,34 @@ fn worker_loop(inner: Arc<Inner>) {
 /// Converte RGBA→RGB24 lendo de `src` para `dst` (buffer reutilizado entre
 /// frames — o caminho quente da entrega não aloca; o antigo
 /// `frame.to_vec()` custava ~8 MB de alloc por frame a 1080p).
+///
+/// `MEDIASUBTYPE_RGB24` guarda cada pixel na ordem B,G,R (convenção do DIB
+/// do Windows) — não R,G,B. Sem inverter aqui, vermelho e azul saem
+/// trocados em todo frame entregue ao consumidor (OBS/Meet), mesmo com o
+/// RGBA de origem (usado no preview do próprio app) correto.
 fn convert_rgba_to_rgb24_into(src: &[u8], dst: &mut Vec<u8>) {
     dst.clear();
     dst.reserve(src.len() / 4 * 3);
     for px in src.chunks_exact(4) {
-        dst.extend_from_slice(&px[..3]);
+        dst.push(px[2]);
+        dst.push(px[1]);
+        dst.push(px[0]);
     }
 }
 
 /// `standby_frame` gera RGBA (contrato do backend — ver `virtualcam::mod`);
 /// o pino só transporta RGB24 (media type negociado). Descarta o canal
 /// alfa in-place para não alocar um segundo buffer a cada troca para
-/// standby.
+/// standby. Mesma inversão B,G,R de `convert_rgba_to_rgb24_into` (ver ali).
 fn convert_rgba_to_rgb24_in_place(buf: &mut Vec<u8>) {
     let pixels = buf.len() / 4;
     for i in 0..pixels {
-        buf[i * 3] = buf[i * 4];
-        buf[i * 3 + 1] = buf[i * 4 + 1];
-        buf[i * 3 + 2] = buf[i * 4 + 2];
+        let r = buf[i * 4];
+        let g = buf[i * 4 + 1];
+        let b = buf[i * 4 + 2];
+        buf[i * 3] = b;
+        buf[i * 3 + 1] = g;
+        buf[i * 3 + 2] = r;
     }
     buf.truncate(pixels * 3);
 }

@@ -404,7 +404,7 @@ async fn bootstrap_windows_server(
     config: &StreamConfig,
     session_id: Uuid,
 ) -> Result<(Child, Option<u16>), AppError> {
-    let push_status = Command::new(&paths.adb)
+    let push_status = crate::procutil::hide_console(Command::new(&paths.adb))
         .arg("push")
         .arg(&paths.server_jar)
         .arg(SCRCPY_DEVICE_SERVER_PATH)
@@ -418,7 +418,7 @@ async fn bootstrap_windows_server(
     }
 
     let scid = scid_from_session(session_id);
-    let forward_output = Command::new(&paths.adb)
+    let forward_output = crate::procutil::hide_console(Command::new(&paths.adb))
         .args([
             "forward",
             "tcp:0",
@@ -441,7 +441,7 @@ async fn bootstrap_windows_server(
     let forward_port = parse_forward_port(&String::from_utf8_lossy(&forward_output.stdout));
 
     let args = build_server_launch_args(scid, config);
-    let mut child = Command::new(&paths.adb)
+    let mut child = crate::procutil::hide_console(Command::new(&paths.adb))
         .args(&args)
         .envs(paths.extra_env.iter().cloned())
         .stdout(Stdio::piped())
@@ -531,48 +531,27 @@ async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, fps: u32, s
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let result: Result<(), AppError> = async {
-        let mut socket = connect_video_socket_with_retry(forward_port).await?;
-
-        // Handshake (research.md R12 / doc/develop.md §Connection): o dummy
-        // byte já foi consumido por `connect_video_socket_with_retry`
-        // (é o sinal de que o servidor está pronto); falta só o nome do
-        // device (64 bytes).
-        let mut name_buf = [0u8; DEVICE_NAME_FIELD_LENGTH];
-        socket.read_exact(&mut name_buf).await.map_err(io_err)?;
-        let device_name = parse_device_name(&name_buf);
-
-        let mut codec_buf = [0u8; 4];
-        socket.read_exact(&mut codec_buf).await.map_err(io_err)?;
-        let codec_id = u32::from_be_bytes(codec_buf);
-        if codec_id != CODEC_ID_H264 {
-            return Err(AppError::new(
-                "unsupported_codec",
-                format!("codec de vídeo não suportado: {codec_id:#010x}"),
-            ));
-        }
-
-        let mut session_buf = [0u8; 12];
-        socket.read_exact(&mut session_buf).await.map_err(io_err)?;
-        let session = parse_session_packet(&session_buf).ok_or_else(|| {
-            AppError::new(
-                "protocol_error",
-                "pacote de sessão inválido no socket de vídeo",
-            )
-        })?;
-        tracing::info!(
-            %device_name,
-            width = session.width,
-            height = session.height,
-            "pipeline de vídeo conectado"
-        );
-
         // H264 elementar puro não carrega PTS/DTS nenhum (só NAL units, sem
         // container) — sem dizer o fps, avformat_find_stream_info() tenta
         // *inferir* o frame rate observando o timing real de chegada dos
-        // bytes. `-r` elimina a necessidade de inferir; probesize/
-        // analyzeduration moderados (bem menos que o default, mas não
-        // zerados como numa tentativa anterior que também quebrou o
-        // parsing) ficam como rede de segurança.
+        // bytes. `-r` elimina a necessidade de inferir (já temos o fps
+        // pedido em `config.fps`, não depende do handshake do socket).
+        //
+        // `-analyzeduration` é em MICROSSEGUNDOS: o valor antigo (1_000_000
+        // = 1s inteiro) fazia o ffmpeg gastar até 1s analisando o stream
+        // antes de soltar o primeiro frame decodificado — medido em
+        // hardware real, `read_ms` do primeiro frame batia ~1.2-1.3s. Como
+        // isso só acontece uma vez (não por frame), virava um atraso FIXO
+        // pro resto da sessão inteira (não cresce, mas nunca recupera).
+        // Reduzir probesize/analyzeduration cortou pra ~400ms; abaixo disso
+        // o gargalo passa a ser o overhead do PROCESSO em si (carregar
+        // DLLs, inicializar o decoder) — não dá pra cortar via flag do
+        // ffmpeg, mas dá pra ESCONDER: spawnamos o ffmpeg AGORA, antes de
+        // esperar o socket de vídeo conectar (`app_process` no device pode
+        // levar até `VIDEO_SOCKET_CONNECT_TIMEOUT` = 5s pra terminar de
+        // subir) — o processo já está de pé e o decoder inicializado
+        // quando o primeiro pacote H264 de verdade chegar, em vez de somar
+        // esse overhead DEPOIS que o handshake já terminou.
         //
         // `-fflags nobuffer` NÃO entra: isolado em hardware real (dump do
         // H264 bruto pra disco + replay offline com `ffprobe`/`ffmpeg`, ver
@@ -582,7 +561,7 @@ async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, fps: u32, s
         // mesmo lendo um arquivo local inteiro, sem nenhuma pressão de
         // tempo). Sem ele, o mesmíssimo dado decodifica normalmente.
         let fps_arg = fps.max(1).to_string();
-        let mut ffmpeg = Command::new(&ffmpeg_path)
+        let mut ffmpeg = crate::procutil::hide_console(Command::new(&ffmpeg_path))
             .args([
                 "-loglevel",
                 "warning",
@@ -593,9 +572,9 @@ async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, fps: u32, s
                 "-r",
                 &fps_arg,
                 "-probesize",
-                "1000000",
+                "65536",
                 "-analyzeduration",
-                "1000000",
+                "50000",
                 "-f",
                 "h264",
                 "-i",
@@ -636,6 +615,41 @@ async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, fps: u32, s
                 }
             });
         }
+
+        let mut socket = connect_video_socket_with_retry(forward_port).await?;
+
+        // Handshake (research.md R12 / doc/develop.md §Connection): o dummy
+        // byte já foi consumido por `connect_video_socket_with_retry`
+        // (é o sinal de que o servidor está pronto); falta só o nome do
+        // device (64 bytes).
+        let mut name_buf = [0u8; DEVICE_NAME_FIELD_LENGTH];
+        socket.read_exact(&mut name_buf).await.map_err(io_err)?;
+        let device_name = parse_device_name(&name_buf);
+
+        let mut codec_buf = [0u8; 4];
+        socket.read_exact(&mut codec_buf).await.map_err(io_err)?;
+        let codec_id = u32::from_be_bytes(codec_buf);
+        if codec_id != CODEC_ID_H264 {
+            return Err(AppError::new(
+                "unsupported_codec",
+                format!("codec de vídeo não suportado: {codec_id:#010x}"),
+            ));
+        }
+
+        let mut session_buf = [0u8; 12];
+        socket.read_exact(&mut session_buf).await.map_err(io_err)?;
+        let session = parse_session_packet(&session_buf).ok_or_else(|| {
+            AppError::new(
+                "protocol_error",
+                "pacote de sessão inválido no socket de vídeo",
+            )
+        })?;
+        tracing::info!(
+            %device_name,
+            width = session.width,
+            height = session.height,
+            "pipeline de vídeo conectado"
+        );
 
         let frame_bytes = session.width as usize * session.height as usize * 4;
         // Read (decode) e sink (cópia para a memória compartilhada do

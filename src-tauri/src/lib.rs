@@ -12,6 +12,7 @@ pub mod device_manager;
 pub mod error;
 pub mod model;
 pub mod preview;
+pub mod procutil;
 pub mod raw_manager;
 pub mod rtsp_manager;
 pub mod secrets;

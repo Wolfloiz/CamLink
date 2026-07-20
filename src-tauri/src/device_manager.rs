@@ -130,7 +130,7 @@ pub fn diff_devices(previous: &[AndroidDevice], current: &[AndroidDevice]) -> Ve
 }
 
 async fn query_sdk_version(adb_path: &Path, serial: &str) -> Result<u32, AppError> {
-    let output = Command::new(adb_path)
+    let output = crate::procutil::hide_console(Command::new(adb_path))
         .args(["-s", serial, "shell", "getprop", "ro.build.version.sdk"])
         .output()
         .await
@@ -154,7 +154,7 @@ pub async fn poll_devices(
     adb_path: &Path,
     previous: &mut Vec<AndroidDevice>,
 ) -> Result<Vec<DeviceEvent>, AppError> {
-    let output = Command::new(adb_path)
+    let output = crate::procutil::hide_console(Command::new(adb_path))
         .args(["devices", "-l"])
         .output()
         .await
