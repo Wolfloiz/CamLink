@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_focus", "mode": "continuous" },
+  "response": { "ok": true, "data": { "mode": "continuous" } }
+}

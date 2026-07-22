@@ -78,7 +78,8 @@ CamLink, sem interromper o stream: zoom digital contínuo, foco (automático
 contínuo, toque-para-focar em uma região do preview, ou manual por distância),
 compensação de exposição (-2 a +2 EV) ou exposição manual completa, ISO, balanço
 de branco por modos pré-definidos, estabilização eletrônica (EIS) liga/desliga,
-lanterna (torch) e troca entre câmera frontal e traseira.
+lanterna (torch), troca entre câmera frontal e traseira, e ajuste de orientação
+do vídeo entregue (girar em passos de 90° e espelhar horizontalmente).
 
 **Why this priority**: É o principal diferencial declarado do produto frente a
 alternativas que só transmitem vídeo bruto.
@@ -103,6 +104,13 @@ frontal/traseira e confirmar retomada em até 2 segundos.
 5. **Given** um aparelho que não suporta determinado controle (ex.: ISO manual),
    **When** o painel de controles é exibido, **Then** o controle não suportado
    aparece desabilitado ou oculto, com indicação da limitação.
+6. **Given** uma transmissão ativa, **When** o usuário espelha horizontalmente
+   ou gira a imagem em 180°, **Then** o vídeo entregue reflete a mudança em
+   menos de 1 segundo, sem interrupção do stream.
+7. **Given** uma transmissão ativa, **When** o usuário gira a imagem em 90° ou
+   270°, **Then** o vídeo retorna nas dimensões trocadas (largura↔altura) em
+   no máximo 2 segundos e o aplicativo consumidor continua funcionando sem
+   reselecionar o dispositivo.
 
 ---
 
@@ -295,6 +303,11 @@ fluido e independente em ambas.
   segundos, sem reconfiguração do aplicativo consumidor.
 - **FR-016**: Controles não suportados pelo aparelho MUST aparecer
   desabilitados/ocultos com indicação da limitação.
+- **FR-016a**: O sistema MUST permitir girar (0°/90°/180°/270°) e espelhar
+  horizontalmente o vídeo entregue, independente do aparelho (transformação
+  aplicada no desktop, não no celular). Espelhar e girar 180° aplicam sem
+  interromper o stream (mesma resolução); girar 90°/270° troca largura↔altura
+  e segue o mesmo orçamento de interrupção de FR-015 (≤ 2 s).
 
 **Modos inteligentes**
 
@@ -391,8 +404,9 @@ fluido e independente em ambas.
   Chrome, Firefox e Discord sem qualquer configuração manual além de
   selecioná-lo.
 - **SC-004**: Todo controle de câmera aplicado reflete no vídeo entregue em
-  menos de 1 segundo, sem queda do stream; a troca frontal/traseira interrompe o
-  vídeo por no máximo 2 segundos.
+  menos de 1 segundo, sem queda do stream; a troca frontal/traseira e a rotação
+  em 90°/270° interrompem o vídeo por no máximo 2 segundos; espelhar e girar
+  180° não interrompem o stream.
 - **SC-005**: Transmissão sustentada por sessões de pelo menos 2 horas sem
   interrupção perceptível ou vazamento de recursos.
 - **SC-006**: Arquivos DNG capturados abrem sem erro nos editores RAW de

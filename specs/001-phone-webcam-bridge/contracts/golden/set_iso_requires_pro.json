@@ -1,0 +1,6 @@
+{
+  "capabilities": "full",
+  "mode": "auto",
+  "request": { "cmd": "set_iso", "value": 400 },
+  "response": { "ok": false, "error": { "code": "BAD_REQUEST", "msg": "set_iso exige modo pro" } }
+}

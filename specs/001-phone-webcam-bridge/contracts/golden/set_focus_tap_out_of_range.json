@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_focus", "mode": "tap", "x": 1.5, "y": 0.3 },
+  "response": { "ok": false, "error": { "code": "OUT_OF_RANGE", "msg": "coordenadas de foco fora de [0, 1]" } }
+}

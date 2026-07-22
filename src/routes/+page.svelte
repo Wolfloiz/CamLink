@@ -1,8 +1,16 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
+  import CameraControls from "$lib/CameraControls.svelte";
   import DeviceList from "$lib/DeviceList.svelte";
   import Preview from "$lib/Preview.svelte";
-  import { startStream, stopStream, onSessionState } from "$lib/api";
+  import RtspPanel from "$lib/RtspPanel.svelte";
+  import {
+    onSessionReplaced,
+    onSessionState,
+    setControl,
+    startStream,
+    stopStream,
+  } from "$lib/api";
   import {
     DEFAULT_STREAM_CONFIG,
     isSessionActive,
@@ -10,6 +18,7 @@
     type AndroidDevice,
     type SessionState,
     type SessionStats,
+    type StartStreamResponse,
     type StreamConfig,
     type VideoCodec,
   } from "$lib/types";
@@ -38,7 +47,11 @@
 
   const active = $derived(sessionId !== null);
 
+  // Sessão RTSP ativa mais recente (preview independente da sessão Android).
+  let rtspSessionId = $state<string | null>(null);
+
   let unlistenSessionState: (() => void) | null = null;
+  let unlistenSessionReplaced: (() => void) | null = null;
 
   $effect(() => {
     onSessionState((event) => {
@@ -51,15 +64,43 @@
     }).then((fn) => {
       unlistenSessionState = fn;
     });
+    // Rotação 90°/270° reinicia a sessão por baixo (T079) — realinha o
+    // session_id sem o usuário perceber.
+    onSessionReplaced((event) => {
+      if (event.old_session_id !== sessionId) return;
+      sessionId = event.response.session_id;
+      sessionState = event.response.state;
+      sessionStats = event.response.stats;
+    }).then((fn) => {
+      unlistenSessionReplaced = fn;
+    });
     return () => {
       unlistenSessionState?.();
       unlistenSessionState = null;
+      unlistenSessionReplaced?.();
+      unlistenSessionReplaced = null;
     };
   });
 
   onDestroy(() => {
     unlistenSessionState?.();
+    unlistenSessionReplaced?.();
   });
+
+  function adoptSession(response: StartStreamResponse) {
+    sessionId = response.session_id;
+    sessionState = response.state;
+    sessionStats = response.stats;
+  }
+
+  async function handleTapToFocus(x: number, y: number) {
+    if (!sessionId) return;
+    try {
+      await setControl(sessionId, { focus: { tap: { x, y } } });
+    } catch (e) {
+      applyError(e);
+    }
+  }
 
   function buildConfig(): StreamConfig {
     return {
@@ -205,9 +246,32 @@
     </div>
   {/if}
 
+  {#if active && sessionId && selectedDevice}
+    <section>
+      <h2>Controles da câmera</h2>
+      <CameraControls
+        {sessionId}
+        serial={selectedDevice.serial}
+        onSessionChanged={adoptSession}
+        onError={applyError}
+      />
+    </section>
+  {/if}
+
   <section>
     <h2>Preview</h2>
-    <Preview sessionId={active ? sessionId : null} />
+    <Preview
+      sessionId={active ? sessionId : rtspSessionId}
+      onTap={active ? handleTapToFocus : undefined}
+    />
+  </section>
+
+  <section>
+    <h2>Câmeras IP (RTSP)</h2>
+    <RtspPanel
+      onError={applyError}
+      onStarted={(_id, response) => (rtspSessionId = response.session_id)}
+    />
   </section>
 </main>
 

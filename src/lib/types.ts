@@ -72,6 +72,102 @@ export interface AppError {
   action_hint: string | null;
 }
 
+// --- US2: controles de câmera (contracts/tauri-commands.md, model.rs) ---
+
+export type CameraFacing = "front" | "back";
+
+export interface CameraInfo {
+  id: string;
+  facing: CameraFacing;
+  max_resolution: [number, number];
+  fps_ranges: Array<[number, number]>;
+}
+
+export type WbMode =
+  | "auto"
+  | "daylight"
+  | "cloudy"
+  | "fluorescent"
+  | "incandescent";
+
+export interface DeviceCapabilities {
+  cameras: CameraInfo[];
+  zoom_range: [number, number];
+  iso_range: [number, number] | null;
+  exposure_comp_range: [number, number];
+  wb_modes: WbMode[];
+  supports_eis: boolean;
+  supports_torch: boolean;
+  raw: { sensor_size: [number, number]; frame_bytes: number } | null;
+}
+
+export type FocusMode =
+  | "continuous_auto"
+  | { tap: { x: number; y: number } }
+  | { manual: { distance: number } };
+
+export type Rotation = "deg0" | "deg90" | "deg180" | "deg270";
+
+export type SmartMode = "auto" | "night" | "sport" | "pro";
+
+export interface ControlState {
+  mode: SmartMode;
+  zoom_ratio: number;
+  focus: FocusMode;
+  exposure_comp: number;
+  manual_exposure: { iso: number; exposure_time_ns: number } | null;
+  wb_mode: WbMode;
+  eis: boolean;
+  torch: boolean;
+  rotation: Rotation;
+  mirror: boolean;
+}
+
+/** Enum serde externally-tagged de `ControlChange` (lib.rs). */
+export type ControlChange =
+  | { zoom: number }
+  | { focus: FocusMode }
+  | { exposure_comp: number }
+  | { iso: number }
+  | { wb: WbMode }
+  | { eis: boolean }
+  | { torch: boolean }
+  | { rotation: Rotation }
+  | { mirror: boolean };
+
+export interface ControlStateEvent {
+  session_id: string;
+  control_state: ControlState;
+}
+
+export interface AfStateEvent {
+  session_id: string;
+  state: "focused" | "searching" | "failed" | string;
+}
+
+/** Restart interno (rotação 90°/270°) trocou a sessão de lugar. */
+export interface SessionReplacedEvent {
+  old_session_id: string;
+  response: StartStreamResponse;
+}
+
+// --- US4: fontes RTSP (model.rs RtspSource) ---
+
+export type RtspState =
+  | "idle"
+  | "connecting"
+  | "streaming"
+  | "reconnecting"
+  | { error: string };
+
+export interface RtspSource {
+  id: string;
+  name: string;
+  url: string;
+  secret_ref: string | null;
+  state: RtspState;
+}
+
 export interface SessionStateEvent {
   session_id: string;
   state: SessionState;

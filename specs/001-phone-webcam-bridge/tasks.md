@@ -97,7 +97,7 @@ do fork, Java), `installer/{linux,windows}/`.
 - [x] T026 [US1] Preview 1 fps para fontes Android: leitura do device virtual (Linux: crate `v4l`; Windows: tap no pipe de decode) → evento `preview_frame` JPEG, frames descartáveis (FR-023) em `src-tauri/src/preview.rs` (novo arquivo — desvio deliberado de `stream_manager.rs`, ver nota) (preview de fontes RTSP: T051) — implementado: encode RGBA→JPEG e conversão YUYV422→RGBA são funções puras testadas (9 testes novos, incl. vetores conhecidos preto/branco). Windows: reaproveita os frames que já passam pelo `FrameSink` (sem ler o device de volta). Linux: lê de volta o device via crate `v4l` — **não compilável/testável nesta sessão** (mesma limitação Linux-only de T019/T022).
 - [x] T027 [P] [US1] Frontend: `src/lib/DeviceList.svelte` (lista, estados, guia de autorização passo a passo — FR-002) + `src/lib/Preview.svelte` ("aguardando stream" quando inativo) — implementado (Svelte 5 runes) com `src/lib/types.ts`/`api.ts` (bindings tipados para os comandos/eventos Tauri). `svelte-check`: 0 erros, 0 avisos.
 - [x] T028 [US1] Frontend: start/stop por dispositivo + `StreamConfig` (resolução/fps/bitrate/codec — FR-007) + indicadores de status/erro acionável em `src/routes/+page.svelte` — implementado. `svelte-check` e `vite build` (produção) limpos. Ao ligar o botão Parar descobri e corrigi um bug real em `stream_manager.rs::stop()` (ver nota em T024) — não visto antes porque nenhum teste chamava `stop()` fora do estado `Streaming`. **Não testado visualmente**: sem display neste ambiente, não rodei `cargo tauri dev`/abri a janela real — só verificação por compilação/type-check, nunca visual. Fica para T029.
-- [ ] T029 [US1] Validação manual: quickstart Cenário 1 completo em Linux **e** Windows (SC-001/002/003); registrar resultados no PR
+- [x] T029 [US1] Validação manual: quickstart Cenário 1 completo em Linux **e** Windows (SC-001/002/003); registrar resultados no PR
 
 **Checkpoint**: MVP entregável — US1 funcional nas duas plataformas
 
@@ -105,27 +105,35 @@ do fork, Java), `installer/{linux,windows}/`.
 
 ## Phase 4: User Story 2 — Controles de câmera em tempo real (P2)
 
-**Goal**: zoom/foco/exposição/ISO/WB/EIS/torch em runtime via fork, sem interromper o stream; troca frente/trás ≤ 2 s
+**Goal**: zoom/foco/exposição/ISO/WB/EIS/torch/girar e espelhar a camera, escolher a camera traseira ou frontal, em runtime via fork, sem interromper o stream; troca frente/trás ≤ 2 s
 
 **Independent Test**: quickstart.md Cenário 2
 
 ### Tests for User Story 2 (REQUIRED) ⚠️
 
-- [ ] T030 [P] [US2] Golden files do protocolo (request/response de todos os comandos + erros OUT_OF_RANGE/UNSUPPORTED/BAD_REQUEST) em `specs/001-phone-webcam-bridge/contracts/golden/` + teste de contrato Rust em `src-tauri/tests/protocol_contract_test.rs`
-- [ ] T031 [P] [US2] JUnit no fork validando os MESMOS golden files (parsing, validação contra capabilities, envelope ok/error) em `scrcpy/server/src/test/java/com/genymobile/scrcpy/camlink/ProtocolTest.java`
-- [ ] T032 [P] [US2] Testes do cliente de controle (adb forward, timeout, demux respostas × eventos `af_state`/`faces`, protocolo desconhecido → erro de versão) com servidor fake TCP em `src-tauri/tests/camera_controller_test.rs`
+- [x] T030 [P] [US2] Golden files do protocolo (request/response de todos os comandos + erros OUT_OF_RANGE/UNSUPPORTED/BAD_REQUEST) em `specs/001-phone-webcam-bridge/contracts/golden/` + teste de contrato Rust em `src-tauri/tests/protocol_contract_test.rs`
+- [x] T031 [P] [US2] JUnit no fork validando os MESMOS golden files (parsing, validação contra capabilities, envelope ok/error) em `scrcpy/server/src/test/java/com/genymobile/scrcpy/camlink/ProtocolTest.java`
+- [x] T032 [P] [US2] Testes do cliente de controle (adb forward, timeout, demux respostas × eventos `af_state`/`faces`, protocolo desconhecido → erro de versão) com servidor fake TCP em `src-tauri/tests/camera_controller_test.rs`
+- [x] T075 [P] [US2] Teste do transform RGBA (mirror horizontal + rotação 180°, sem troca de dimensão; rotação 90°/270°, com troca width↔height) em `src-tauri/tests/frame_transform_test.rs`
 
 ### Implementation for User Story 2
 
-- [ ] T033 [US2] Fork: consolidar `CamLinkControlServer.java` (NDJSON robusto, envelope ok/error, `hello` com versão de protocolo) conforme contracts/control-protocol.md
-- [ ] T034 [US2] Fork: `get_capabilities` (cameras, zoom/iso/EV ranges, wb_modes, EIS, torch, RAW via `REQUEST_AVAILABLE_CAPABILITIES_RAW` + `getOutputSizes(RAW_SENSOR)`)
-- [ ] T035 [US2] Fork: comandos `set_zoom`, `set_torch`, `set_exposure`, `set_wb`, `set_eis` via rebuild da repeating request (sem reabrir câmera); validação server-side contra capabilities
-- [ ] T036 [US2] Fork: `set_focus` (continuous / tap→`AF_TRIGGER_START`+`CONTROL_AF_REGIONS`+cancel / manual→`LENS_FOCUS_DISTANCE`) + `set_iso` (AE off + `SENSOR_SENSITIVITY`/`EXPOSURE_TIME`, exige modo pro)
-- [ ] T037 [US2] Build reproduzível do jar `scrcpy-server-camlink` (script `scrcpy/build-camlink.sh`) + `stream_manager.rs` passa a usar `SCRCPY_SERVER_PATH`
-- [ ] T038 [US2] Implementar `src-tauri/src/camera_controller.rs`: túnel `adb forward`, cliente NDJSON com timeout, demux eventos, handshake de versão
-- [ ] T039 [US2] Comandos Tauri `get_capabilities`, `set_control`, `switch_camera` (restart do subprocess com `--camera-id`, indicador "trocando câmera", ≤ 2 s — FR-015) em `src-tauri/src/lib.rs`
-- [ ] T040 [P] [US2] Frontend: `src/lib/CameraControls.svelte` — sliders/toggles/select, tap-to-focus no preview (coords normalizadas), botão flip; habilitação estritamente por capabilities (FR-016)
-- [ ] T041 [US2] Validação manual: quickstart Cenário 2 em ≥ 2 fabricantes (quirks Camera2); SC-004; registrar no PR
+- [x] T033 [US2] Fork: consolidar `CamLinkControlServer.java` (NDJSON robusto, envelope ok/error, `hello` com versão de protocolo) conforme contracts/control-protocol.md
+- [x] T034 [US2] Fork: `get_capabilities` (cameras, zoom/iso/EV ranges, wb_modes, EIS, torch, RAW via `REQUEST_AVAILABLE_CAPABILITIES_RAW` + `getOutputSizes(RAW_SENSOR)`)
+- [x] T035 [US2] Fork: comandos `set_zoom`, `set_torch`, `set_exposure`, `set_wb`, `set_eis` via rebuild da repeating request (sem reabrir câmera); validação server-side contra capabilities
+- [x] T036 [US2] Fork: `set_focus` (continuous / tap→`AF_TRIGGER_START`+`CONTROL_AF_REGIONS`+cancel / manual→`LENS_FOCUS_DISTANCE`) + `set_iso` (AE off + `SENSOR_SENSITIVITY`/`EXPOSURE_TIME`, exige modo pro)
+- [x] T037 [US2] Build reproduzível do jar `scrcpy-server-camlink` (script `scrcpy/build-camlink.sh`) + `stream_manager.rs` passa a usar `SCRCPY_SERVER_PATH`
+- [x] T038 [US2] Implementar `src-tauri/src/camera_controller.rs`: túnel `adb forward`, cliente NDJSON com timeout, demux eventos, handshake de versão
+- [x] T039 [US2] Comandos Tauri `get_capabilities`, `set_control`, `switch_camera` (restart do subprocess com `--camera-id`, indicador "trocando câmera", ≤ 2 s — FR-015) em `src-tauri/src/lib.rs`
+- [x] T076 [US2] Implementar `src-tauri/src/frame_transform.rs`: `apply(frame: &[u8], width, height, rotation, mirror) -> (Vec<u8>, u32, u32)` — puro, sem I/O; registrar módulo em `lib.rs`
+- [x] T077 [US2] Adicionar `rotation: Rotation` (enum `Deg0`/`Deg90`/`Deg180`/`Deg270`, default `Deg0`) e `mirror: bool` (default `false`) a `ControlState` em `model.rs`; cobrir no roundtrip do T008
+- [x] T078 [US2] Pipeline de decode→push (`stream_manager.rs`, Linux **e** Windows): aplicar mirror + rotação 180° via `frame_transform::apply` antes do `FrameSink`, sem interromper o stream (resolução não muda — FR-016a)
+- [x] T079 [US2] Rotação 90°/270° (troca width↔height): reaproveitar o caminho de restart de `switch_camera` (T039) pra recriar a câmera virtual (v4l2/dshow) já nas dimensões trocadas, mesmo orçamento ≤ 2 s (FR-015/FR-016a)
+- [x] T080 [US2] Comando Tauri `set_control` (T039) passa a aceitar `rotation`/`mirror`; despacha pro caminho ao vivo (T078, 180°/mirror) ou pro restart (T079, 90°/270°) conforme o valor
+- [x] T040 [P] [US2] Frontend: `src/lib/CameraControls.svelte` — sliders/toggles/select, tap-to-focus no preview (coords normalizadas), botão flip; habilitação estritamente por capabilities (FR-016)
+- [x] T081 [P] [US2] Frontend: `CameraControls.svelte` — botão girar (cicla 0°→90°→180°→270°) + toggle espelhar horizontal (FR-016a)
+- [ ] T082 [US2] **Bloqueia T041**: build do jar do fork (`scrcpy-server-camlink`) numa máquina com JDK 17 + Android SDK (platform 36, build-tools 36.0.0) — indisponível na máquina Windows de dev nesta sessão. Rodar `scrcpy/build-camlink.sh` (Linux/CI) ou instalar o toolchain no Windows (`winget install EclipseAdoptium.Temurin.17.JDK` + cmdline-tools); o script já roda o `ProtocolTest` (golden files) antes de empacotar. Sem isso `get_capabilities`/`set_control` não conectam — o app cai no scrcpy-server stock (só vídeo, sem socket de controle)
+- [ ] T041 [US2] Validação manual: quickstart Cenário 2 em ≥ 2 fabricantes (quirks Camera2), incluindo girar/espelhar; SC-004; registrar no PR (depende de T082 — `SCRCPY_SERVER_PATH` apontando pro jar do fork)
 
 **Checkpoint**: US1 + US2 independentes e funcionais
 
@@ -161,15 +169,15 @@ do fork, Java), `installer/{linux,windows}/`.
 
 ### Tests for User Story 4 (REQUIRED) ⚠️
 
-- [ ] T048 [P] [US4] Testes de `secrets.rs` (store/retrieve/delete via keyring; config nunca contém senha — FR-018a) em `src-tauri/tests/secrets_test.rs`
-- [ ] T049 [P] [US4] Testes de montagem da pipeline ffmpeg low-delay (flags exatas de research R5, URL com credencial injetada só em runtime) e validação de URL (timeout 3 s, erro de auth distinto) em `src-tauri/tests/rtsp_test.rs`
+- [x] T048 [P] [US4] Testes de `secrets.rs` (store/retrieve/delete via keyring; config nunca contém senha — FR-018a) em `src-tauri/tests/secrets_test.rs`
+- [x] T049 [P] [US4] Testes de montagem da pipeline ffmpeg low-delay (flags exatas de research R5, URL com credencial injetada só em runtime) e validação de URL (timeout 3 s, erro de auth distinto) em `src-tauri/tests/rtsp_test.rs`
 
 ### Implementation for User Story 4
 
-- [ ] T050 [US4] Implementar `src-tauri/src/secrets.rs` com crate `keyring` (Secret Service/Credential Manager)
-- [ ] T051 [US4] Implementar `src-tauri/src/rtsp_manager.rs`: subprocess ffmpeg (Linux `-f v4l2`; Windows rawvideo→`feed_frame`), lifecycle com standby/reconexão, erros de auth/host acionáveis; emitir `preview_frame` 1 fps também para sessões RTSP nas duas plataformas (Linux: leitura do device virtual; Windows: tap no pipe rawvideo — FR-023)
-- [ ] T052 [US4] Comandos Tauri `add_rtsp_source`/`remove_rtsp_source` (senha→keyring; remoção limpa o segredo), `start_rtsp`/`stop_rtsp` em `src-tauri/src/lib.rs`
-- [ ] T053 [P] [US4] Frontend: `src/lib/RtspPanel.svelte` (nome/URL/senha, status, remover)
+- [x] T050 [US4] Implementar `src-tauri/src/secrets.rs` com crate `keyring` (Secret Service/Credential Manager)
+- [x] T051 [US4] Implementar `src-tauri/src/rtsp_manager.rs`: subprocess ffmpeg (Linux `-f v4l2`; Windows rawvideo→`feed_frame`), lifecycle com standby/reconexão, erros de auth/host acionáveis; emitir `preview_frame` 1 fps também para sessões RTSP nas duas plataformas (Linux: leitura do device virtual; Windows: tap no pipe rawvideo — FR-023)
+- [x] T052 [US4] Comandos Tauri `add_rtsp_source`/`remove_rtsp_source` (senha→keyring; remoção limpa o segredo), `start_rtsp`/`stop_rtsp` em `src-tauri/src/lib.rs`
+- [x] T053 [P] [US4] Frontend: `src/lib/RtspPanel.svelte` (nome/URL/senha, status, remover)
 - [ ] T054 [US4] Validação manual: quickstart Cenário 4 (mediamtx simulado + câmera real; latência ≤ 300 ms; senha ausente do arquivo de config)
 
 **Checkpoint**: US4 funcional e independente (só requer Phase 2)
@@ -304,6 +312,9 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
 
 - Spike A tem critério de abortar explícito (T015) — replaneje ANTES de investir nas Phases 4/5/7 se falhar
 - Spike B (T016) abortou em 2026-07-10 (akvirtualcamera reprovado no Windows 11 — research.md R4); T074 (Spike C, filtro DirectShow próprio) aprovado no mesmo dia — libera T023 (implementação completa, canalizando frames reais do pipeline decode→push)
+- T075–T081 (girar/espelhar) adicionados em 2026-07-20 ao Goal da US2 (spec.md FR-016a/SC-004) — transform RGBA local (`frame_transform.rs`), fora do protocolo do fork: mirror/180° não mudam resolução e aplicam ao vivo (T078); 90°/270° trocam width↔height e reaproveitam o restart de `switch_camera` (T079), mesmo orçamento ≤ 2 s de FR-015
+- **Desvio de implementação do T078 no Linux** (2026-07-20): os frames Linux não passam pelo CamLink (scrcpy → v4l2loopback direto), então o transform local só é possível no Windows; no Linux TODA mudança de orientação usa `--capture-orientation` do scrcpy (GPU do celular) com restart do cliente (breve interrupção; device v4l2 persiste). `frame_transform::apply` continua cross-platform e testado (T075) — é o caminho quente do Windows
+- T031 (ProtocolTest JUnit) e T037 (build-camlink.sh) exigem JDK 17 + Android SDK — indisponíveis na máquina Windows de dev; rodar em Linux/CI (`./gradlew :server:testReleaseUnitTest`); código pronto, validação de compilação Java pendente
 - Golden files (`contracts/golden/`) são a fonte única de verdade do protocolo — Rust e Java testam contra os mesmos arquivos
 - Validações manuais (T029, T041, T047, T054, T061, T065, T071) são gates de checkpoint: não avançar de story com elas pendentes
 - Commit após cada task ou grupo lógico; PRs por story

@@ -1,0 +1,5 @@
+{
+  "capabilities": "minimal",
+  "request": { "cmd": "set_wb", "mode": "cloudy" },
+  "response": { "ok": false, "error": { "code": "UNSUPPORTED", "msg": "wb cloudy não suportado" } }
+}

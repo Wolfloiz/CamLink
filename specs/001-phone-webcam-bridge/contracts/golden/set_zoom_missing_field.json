@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_zoom" },
+  "response": { "ok": false, "error": { "code": "BAD_REQUEST", "msg": "campo obrigatório ausente: ratio" } }
+}

@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_focus", "mode": "banana" },
+  "response": { "ok": false, "error": { "code": "BAD_REQUEST", "msg": "modo de foco inválido: banana" } }
+}

@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request_raw": "{not json",
+  "response": { "ok": false, "error": { "code": "BAD_REQUEST", "msg": "JSON inválido" } }
+}

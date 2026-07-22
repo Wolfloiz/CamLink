@@ -1,0 +1,6 @@
+{
+  "capabilities": "minimal",
+  "mode": "pro",
+  "request": { "cmd": "set_iso", "value": 400 },
+  "response": { "ok": false, "error": { "code": "UNSUPPORTED", "msg": "iso manual não suportado" } }
+}

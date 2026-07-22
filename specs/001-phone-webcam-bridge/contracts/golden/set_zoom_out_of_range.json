@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_zoom", "ratio": 12.5 },
+  "response": { "ok": false, "error": { "code": "OUT_OF_RANGE", "msg": "zoom 12.5 fora de [1.0, 8.0]" } }
+}

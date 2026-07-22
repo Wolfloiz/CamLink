@@ -2,7 +2,25 @@
   import { onDestroy } from "svelte";
   import { onPreviewFrame } from "./api";
 
-  let { sessionId }: { sessionId: string | null } = $props();
+  let {
+    sessionId,
+    onTap,
+  }: {
+    sessionId: string | null;
+    /** Tap-to-focus (US2): coordenadas normalizadas [0,1] do clique. */
+    onTap?: (x: number, y: number) => void;
+  } = $props();
+
+  function handleClick(event: MouseEvent) {
+    if (!onTap || !frameSrc) return;
+    const target = event.currentTarget as HTMLElement;
+    const rect = target.getBoundingClientRect();
+    const x = (event.clientX - rect.left) / rect.width;
+    const y = (event.clientY - rect.top) / rect.height;
+    if (x >= 0 && x <= 1 && y >= 0 && y <= 1) {
+      onTap(x, y);
+    }
+  }
 
   let frameSrc = $state<string | null>(null);
   let unlisten: (() => void) | null = null;
@@ -41,7 +59,12 @@
   });
 </script>
 
-<div class="preview">
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+<div
+  class="preview"
+  class:tappable={onTap !== undefined && frameSrc !== null}
+  onclick={handleClick}
+>
   {#if frameSrc}
     <img src={frameSrc} alt="Preview do stream" />
   {:else}
@@ -62,6 +85,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+
+  .preview.tappable {
+    cursor: crosshair;
   }
 
   .preview img {

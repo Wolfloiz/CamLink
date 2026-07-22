@@ -1,0 +1,5 @@
+{
+  "capabilities": "minimal",
+  "request": { "cmd": "set_eis", "enabled": true },
+  "response": { "ok": false, "error": { "code": "UNSUPPORTED", "msg": "eis não suportado" } }
+}

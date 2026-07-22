@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_exposure", "compensation": 5 },
+  "response": { "ok": false, "error": { "code": "OUT_OF_RANGE", "msg": "compensation 5 fora de [-2, 2]" } }
+}

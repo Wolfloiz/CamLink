@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "hello" },
+  "response": { "ok": true, "protocol": 1, "server": "camlink-v4.0" }
+}

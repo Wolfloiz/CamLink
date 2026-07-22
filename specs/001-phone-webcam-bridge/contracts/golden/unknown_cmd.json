@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "warp_drive" },
+  "response": { "ok": false, "error": { "code": "BAD_REQUEST", "msg": "comando desconhecido: warp_drive" } }
+}

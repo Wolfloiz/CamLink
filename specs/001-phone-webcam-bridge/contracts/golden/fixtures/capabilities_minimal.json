@@ -1,0 +1,12 @@
+{
+  "cameras": [
+    { "id": "0", "facing": "back", "max_resolution": [1920, 1080], "fps_ranges": [[30, 30]] }
+  ],
+  "zoom_range": [1.0, 1.0],
+  "iso_range": null,
+  "exposure_comp_range": [0, 0],
+  "wb_modes": ["auto"],
+  "supports_eis": false,
+  "supports_torch": false,
+  "raw": null
+}

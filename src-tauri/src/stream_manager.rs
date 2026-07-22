@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::model::{
-    SessionEvent, SessionSource, SessionState, SessionStats, StreamConfig, StreamSession,
+    Rotation, SessionEvent, SessionSource, SessionState, SessionStats, StreamConfig, StreamSession,
     VideoCodec,
 };
 
@@ -168,11 +168,42 @@ fn codec_name(codec: VideoCodec) -> &'static str {
     }
 }
 
+/// Valor de `--capture-orientation` (cliente) / `capture_orientation`
+/// (server) do scrcpy para a orientação pedida (FR-016a): `flip` = espelho
+/// horizontal aplicado antes da rotação — mesma ordem do
+/// `frame_transform::apply`. `None` para a identidade (flag omitida).
+pub fn capture_orientation_value(rotation: Rotation, mirror: bool) -> Option<String> {
+    let degrees = match rotation {
+        Rotation::Deg0 => "0",
+        Rotation::Deg90 => "90",
+        Rotation::Deg180 => "180",
+        Rotation::Deg270 => "270",
+    };
+    match (rotation, mirror) {
+        (Rotation::Deg0, false) => None,
+        (_, false) => Some(degrees.to_string()),
+        (_, true) => Some(format!("flip{degrees}")),
+    }
+}
+
 /// Argumentos do cliente `scrcpy` stock (Linux): captura a câmera do
 /// Android e escreve direto no device v4l2loopback já criado por
 /// `virtualcam::v4l2` (research.md R3).
 pub fn build_scrcpy_client_args(config: &StreamConfig, v4l2_device: &str) -> Vec<String> {
-    vec![
+    build_scrcpy_client_args_oriented(config, v4l2_device, Rotation::Deg0, false)
+}
+
+/// Variante com orientação (FR-016a): no Linux girar/espelhar é aplicado
+/// pelo próprio scrcpy (`--capture-orientation`, GPU do celular) — os frames
+/// não passam pelo CamLink (vão direto ao v4l2loopback), então a mudança
+/// exige restart do cliente (device v4l2 persiste; consumidores seguem).
+pub fn build_scrcpy_client_args_oriented(
+    config: &StreamConfig,
+    v4l2_device: &str,
+    rotation: Rotation,
+    mirror: bool,
+) -> Vec<String> {
+    let mut args = vec![
         "--video-source=camera".to_string(),
         format!("--camera-id={}", config.camera_id),
         format!(
@@ -186,7 +217,11 @@ pub fn build_scrcpy_client_args(config: &StreamConfig, v4l2_device: &str) -> Vec
         "--no-audio".to_string(),
         "--no-window".to_string(),
         "--no-control".to_string(),
-    ]
+    ];
+    if let Some(orientation) = capture_orientation_value(rotation, mirror) {
+        args.push(format!("--capture-orientation={orientation}"));
+    }
+    args
 }
 
 /// Argumentos do ffmpeg que tira UM snapshot RGBA do lado de captura do
@@ -355,11 +390,17 @@ async fn spawn_backend(
     config: &StreamConfig,
     virtual_camera_target: &str,
     session_id: Uuid,
+    orientation: (Rotation, bool),
 ) -> Result<(Child, Option<u16>), AppError> {
     #[cfg(target_os = "linux")]
     {
         let _ = session_id;
-        let args = build_scrcpy_client_args(config, virtual_camera_target);
+        let args = build_scrcpy_client_args_oriented(
+            config,
+            virtual_camera_target,
+            orientation.0,
+            orientation.1,
+        );
         let mut child = Command::new(&paths.scrcpy)
             .args(&args)
             .envs(paths.extra_env.iter().cloned())
@@ -385,12 +426,21 @@ async fn spawn_backend(
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = virtual_camera_target;
+        // Windows: orientação é aplicada no desktop (frame_transform no
+        // sink, ver lib.rs) — o servidor roda sem transform pra permitir
+        // mirror/180° ao vivo, sem restart (FR-016a/SC-004).
+        let _ = (virtual_camera_target, orientation);
         bootstrap_windows_server(paths, config, session_id).await
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
-        let _ = (paths, config, virtual_camera_target, session_id);
+        let _ = (
+            paths,
+            config,
+            virtual_camera_target,
+            session_id,
+            orientation,
+        );
         Err(AppError::new(
             "unsupported_platform",
             "Plataforma não suportada",
@@ -913,7 +963,7 @@ const PREVIEW_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(200);
 /// logado uma vez por transição, não por tentativa. A task só morre por
 /// `abort()` (stop da sessão ou substituição por um pipeline novo).
 #[cfg(target_os = "linux")]
-async fn run_preview_pipeline(
+pub(crate) async fn run_preview_pipeline(
     ffmpeg_path: PathBuf,
     device: String,
     resolution: (u32, u32),
@@ -1007,6 +1057,28 @@ impl StreamManager {
         virtual_camera_target: &str,
         video_sink: Option<FrameSink>,
     ) -> Result<Uuid, AppError> {
+        self.start_with_orientation(
+            source,
+            config,
+            virtual_camera_target,
+            video_sink,
+            (Rotation::Deg0, false),
+        )
+        .await
+    }
+
+    /// `start` com orientação (FR-016a). No Linux ela vira
+    /// `--capture-orientation` do cliente scrcpy (transform na GPU do
+    /// celular); no Windows é ignorada aqui — o sink em `lib.rs` aplica
+    /// `frame_transform` no desktop.
+    pub async fn start_with_orientation(
+        &self,
+        source: SessionSource,
+        config: StreamConfig,
+        virtual_camera_target: &str,
+        video_sink: Option<FrameSink>,
+        orientation: (Rotation, bool),
+    ) -> Result<Uuid, AppError> {
         let session_id = Uuid::new_v4();
         let mut session = StreamSession {
             source,
@@ -1023,8 +1095,14 @@ impl StreamManager {
 
         let control = Arc::new(SessionControl::new());
 
-        let (child, forward_port) =
-            spawn_backend(&self.paths, &config, virtual_camera_target, session_id).await?;
+        let (child, forward_port) = spawn_backend(
+            &self.paths,
+            &config,
+            virtual_camera_target,
+            session_id,
+            orientation,
+        )
+        .await?;
         maybe_spawn_video_pipeline(
             &self.paths,
             forward_port,
@@ -1053,6 +1131,7 @@ impl StreamManager {
             virtual_camera_target.to_string(),
             video_sink,
             control,
+            orientation,
         );
         Ok(session_id)
     }
@@ -1114,6 +1193,7 @@ impl StreamManager {
         virtual_camera_target: String,
         video_sink: Option<FrameSink>,
         control: Arc<SessionControl>,
+        orientation: (Rotation, bool),
     ) {
         let sessions = Arc::clone(&self.sessions);
         let paths = self.paths.clone();
@@ -1126,6 +1206,7 @@ impl StreamManager {
                 virtual_camera_target,
                 video_sink,
                 control,
+                orientation,
             )
             .await;
         });
@@ -1218,6 +1299,9 @@ async fn finish_stop(sessions: &Arc<Mutex<HashMap<Uuid, RunningSession>>>, sessi
     }
 }
 
+// Plumbing interno com destino único (spawn_monitor): agrupar em struct só
+// adicionaria indireção sem segundo call site.
+#[allow(clippy::too_many_arguments)]
 async fn monitor_session(
     sessions: Arc<Mutex<HashMap<Uuid, RunningSession>>>,
     paths: ExternalPaths,
@@ -1226,6 +1310,7 @@ async fn monitor_session(
     virtual_camera_target: String,
     video_sink: Option<FrameSink>,
     control: Arc<SessionControl>,
+    orientation: (Rotation, bool),
 ) {
     // Corpo num bloco async para que todos os `return` (stop, erro fatal,
     // retry esgotado) desemboquem num único ponto de limpeza do pipeline.
@@ -1302,7 +1387,15 @@ async fn monitor_session(
                         return;
                     }
 
-                    match spawn_backend(&paths, &config, &virtual_camera_target, session_id).await {
+                    match spawn_backend(
+                        &paths,
+                        &config,
+                        &virtual_camera_target,
+                        session_id,
+                        orientation,
+                    )
+                    .await
+                    {
                         Ok((mut new_child, forward_port)) => {
                             if control.is_stop_requested() {
                                 let _ = new_child.start_kill();

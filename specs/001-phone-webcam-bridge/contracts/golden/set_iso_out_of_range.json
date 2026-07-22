@@ -1,0 +1,6 @@
+{
+  "capabilities": "full",
+  "mode": "pro",
+  "request": { "cmd": "set_iso", "value": 12800 },
+  "response": { "ok": false, "error": { "code": "OUT_OF_RANGE", "msg": "iso 12800 fora de [100, 6400]" } }
+}

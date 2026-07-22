@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_exposure", "compensation": -2 },
+  "response": { "ok": true, "data": { "compensation": -2 } }
+}

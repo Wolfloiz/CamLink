@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_torch", "enabled": true },
+  "response": { "ok": true, "data": { "enabled": true } }
+}

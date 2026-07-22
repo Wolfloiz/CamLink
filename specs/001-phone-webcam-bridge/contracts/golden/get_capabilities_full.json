@@ -1,0 +1,20 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "get_capabilities" },
+  "response": {
+    "ok": true,
+    "data": {
+      "cameras": [
+        { "id": "0", "facing": "back", "max_resolution": [4032, 3024], "fps_ranges": [[15, 30], [30, 30], [60, 60]] },
+        { "id": "1", "facing": "front", "max_resolution": [3264, 2448], "fps_ranges": [[15, 30], [30, 30]] }
+      ],
+      "zoom_range": [1.0, 8.0],
+      "iso_range": [100, 6400],
+      "exposure_comp_range": [-2, 2],
+      "wb_modes": ["auto", "daylight", "cloudy", "fluorescent", "incandescent"],
+      "supports_eis": true,
+      "supports_torch": true,
+      "raw": { "sensor_size": [4032, 3024], "frame_bytes": 24385536 }
+    }
+  }
+}

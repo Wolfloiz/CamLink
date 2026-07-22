@@ -1,0 +1,6 @@
+{
+  "capabilities": "full",
+  "mode": "pro",
+  "request": { "cmd": "set_iso", "value": 400 },
+  "response": { "ok": true, "data": { "value": 400 } }
+}

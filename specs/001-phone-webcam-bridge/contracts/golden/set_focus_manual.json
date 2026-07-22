@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_focus", "mode": "manual", "distance": 0.5 },
+  "response": { "ok": true, "data": { "mode": "manual", "distance": 0.5 } }
+}

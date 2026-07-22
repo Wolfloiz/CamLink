@@ -52,6 +52,9 @@ Com stream ativo no OBS:
    reselecionar.
 4. Num aparelho sem ISO manual/RAW → controles correspondentes
    ocultos/desabilitados com explicação (FR-016).
+5. Espelhar horizontalmente e girar 180° → efeito visível em < 1 s, sem queda
+   do stream. Girar 90°/270° → vídeo retorna em ≤ 2 s com largura/altura
+   trocadas, OBS não precisa reselecionar (FR-016a).
 
 ## Cenário 3 — Modos inteligentes (US3)
 

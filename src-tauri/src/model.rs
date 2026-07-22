@@ -295,6 +295,26 @@ pub struct ManualExposure {
     pub exposure_time_ns: u64,
 }
 
+/// Rotação do vídeo entregue (FR-016a), aplicada no desktop — não no celular.
+/// 90°/270° trocam width↔height (exigem recriar a câmera virtual, caminho de
+/// restart ≤ 2 s); 0°/180° preservam as dimensões (aplicáveis ao vivo).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Rotation {
+    #[default]
+    Deg0,
+    Deg90,
+    Deg180,
+    Deg270,
+}
+
+impl Rotation {
+    /// `true` quando a rotação troca largura↔altura do frame.
+    pub fn swaps_dimensions(self) -> bool {
+        matches!(self, Rotation::Deg90 | Rotation::Deg270)
+    }
+}
+
 /// Estado de controles por sessão Android; valores sempre validados contra
 /// `DeviceCapabilities` no servidor (data-model.md).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -307,6 +327,12 @@ pub struct ControlState {
     pub wb_mode: WbMode,
     pub eis: bool,
     pub torch: bool,
+    /// Orientação do vídeo entregue (FR-016a) — transformação local, fora do
+    /// protocolo do fork. `#[serde(default)]` mantém configs antigas válidas.
+    #[serde(default)]
+    pub rotation: Rotation,
+    #[serde(default)]
+    pub mirror: bool,
 }
 
 impl Default for ControlState {
@@ -320,6 +346,8 @@ impl Default for ControlState {
             wb_mode: WbMode::Auto,
             eis: true,
             torch: false,
+            rotation: Rotation::Deg0,
+            mirror: false,
         }
     }
 }

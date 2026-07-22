@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_focus", "mode": "tap", "x": 0.5, "y": 0.3 },
+  "response": { "ok": true, "data": { "mode": "tap", "x": 0.5, "y": 0.3 } }
+}

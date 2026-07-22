@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_wb", "mode": "cloudy" },
+  "response": { "ok": true, "data": { "mode": "cloudy" } }
+}

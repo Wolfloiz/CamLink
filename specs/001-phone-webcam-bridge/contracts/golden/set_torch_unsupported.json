@@ -1,0 +1,5 @@
+{
+  "capabilities": "minimal",
+  "request": { "cmd": "set_torch", "enabled": true },
+  "response": { "ok": false, "error": { "code": "UNSUPPORTED", "msg": "torch não suportado" } }
+}

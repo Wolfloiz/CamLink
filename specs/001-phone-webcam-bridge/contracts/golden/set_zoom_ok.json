@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_zoom", "ratio": 2.5 },
+  "response": { "ok": true, "data": { "ratio": 2.5 } }
+}
