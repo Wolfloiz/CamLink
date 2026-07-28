@@ -219,7 +219,7 @@
         type="button"
         disabled={busy || !hasBothFacings}
         title={hasBothFacings
-          ? "Alternar frontal/traseira (≤ 2 s)"
+          ? "Alternar frontal/traseira (≤ 2 s) — se o Meet mostrar a câmera como indisponível depois, dê F5 na aba"
           : "Aparelho sem par frontal+traseira"}
         onclick={handleFlip}
       >
@@ -229,7 +229,7 @@
       <button
         type="button"
         disabled={busy}
-        title="Girar o vídeo entregue em passos de 90°"
+        title="Girar o vídeo entregue em passos de 90° — girar 90°/270° reinicia a sessão; se o Meet mostrar a câmera como indisponível depois, dê F5 na aba"
         onclick={handleRotate}
       >
         Girar ({ROTATION_LABEL[rotation]})
@@ -248,6 +248,11 @@
 
     <p class="hint">
       Toque no preview para focar naquela região (tap-to-focus).
+    </p>
+    <p class="hint">
+      Trocar de câmera ou girar 90°/270° reinicia a sessão — se o app de
+      chamada (Meet etc.) mostrar a câmera como indisponível depois, dê F5 na
+      aba ou saia e entre de novo na chamada.
     </p>
   {/if}
 </div>

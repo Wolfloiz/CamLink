@@ -50,6 +50,18 @@ cd src-tauri
 cargo fmt --check && cargo clippy -- -D warnings && cargo test
 ```
 
+## Limitações conhecidas
+
+- **Trocar de câmera (frontal/traseira) ou girar 90°/270° pode exigir
+  atualizar a página no Meet/Chrome uma vez.** O scrcpy não suporta trocar de
+  câmera sem reiniciar o processo inteiro (limitação do próprio scrcpy), o
+  que gera um instante sem frame novo. O device virtual continua saudável
+  durante esse instante (confirmado: nenhum evento de add/remove/change no
+  kernel), mas o Meet às vezes marca a câmera como indisponível e não
+  recupera sozinho — nem esperando alguns segundos. **F5 na aba (ou sair e
+  entrar de novo na chamada) resolve.** Giro 0°/180° e espelhar não têm esse
+  problema (não reiniciam o processo).
+
 ## Licença
 
 [GPL-3.0](LICENSE). O fork do scrcpy-server permanece sob Apache-2.0 (licença

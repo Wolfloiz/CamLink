@@ -44,6 +44,25 @@ pub trait VirtualCameraBackend {
         fps: u32,
     ) -> Result<VirtualCamera, VcamError>;
 
+    /// Cria um device SEMPRE novo, sem tentar reaproveitar um existente com
+    /// o mesmo `label` — usado quando a resolução de saída pode ter mudado
+    /// (giro 90°/270° ou troca de câmera). Reaproveitar arriscaria herdar um
+    /// device cujo formato ficou travado por um consumidor (Chrome/Meet)
+    /// ainda aberto nele: confirmado em bancada 2026-07-27 — um writer novo
+    /// com resolução diferente é silenciosamente ignorado pelo
+    /// v4l2loopback enquanto o leitor antigo não fecha o device, entregando
+    /// frames com a geometria errada (câmera some do Meet e não volta).
+    /// Default: delega a `create` (Windows já recria o filtro inteiro do
+    /// zero a cada restart, então reaproveitar nunca se aplicou ali).
+    fn create_fresh(
+        &mut self,
+        label: &str,
+        resolution: (u32, u32),
+        fps: u32,
+    ) -> Result<VirtualCamera, VcamError> {
+        self.create(label, resolution, fps)
+    }
+
     /// Empurra um frame RGBA para o device; transiciona para `Live`.
     fn feed_frame(&mut self, id: &Uuid, frame: &[u8]) -> Result<(), VcamError>;
 
@@ -57,6 +76,17 @@ pub trait VirtualCameraBackend {
     fn camera(&self, id: &Uuid) -> Option<&VirtualCamera>;
 
     fn cameras(&self) -> Vec<&VirtualCamera>;
+
+    /// Colapsa devices duplicados (mesmo label) deixados por sessões
+    /// anteriores que não puderam ser removidos na hora (estavam ocupados
+    /// por um consumidor) de volta a no máximo um por label. Chamado uma
+    /// vez na construção do backend — nesse momento nenhuma sessão do
+    /// CamLink está rodando ainda, então é o ponto mais seguro/eficaz pra
+    /// arrumar o que ficou pra trás sem depender de outro restart
+    /// acontecer (achado em bancada 2026-07-27: sem isso, o Meet/OBS podia
+    /// acumular vários "CamLink Android" na lista de devices). Default:
+    /// no-op (Windows não tem esse tipo de duplicata).
+    fn cleanup_stale(&mut self) {}
 }
 
 /// Gera a imagem de espera (FR-006): fundo escuro com o glifo de câmera do

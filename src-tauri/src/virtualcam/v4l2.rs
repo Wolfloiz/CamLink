@@ -173,9 +173,11 @@ impl Default for V4l2Backend {
 
 impl V4l2Backend {
     pub fn new() -> Self {
-        Self {
+        let mut backend = Self {
             cameras: HashMap::new(),
-        }
+        };
+        backend.cleanup_stale();
+        backend
     }
 
     fn spawn_ffmpeg(
@@ -212,28 +214,25 @@ impl V4l2Backend {
     }
 }
 
-impl VirtualCameraBackend for V4l2Backend {
-    fn create(
-        &mut self,
-        label: &str,
-        resolution: (u32, u32),
-        fps: u32,
-    ) -> Result<VirtualCamera, VcamError> {
-        // Reuso de device estável (ver `find_reusable_device`): duplicatas
-        // do mesmo label (sessões antigas mortas sem cleanup) são removidas
-        // best-effort — `delete` falha com EBUSY se alguém estiver usando,
-        // o que já serve de guarda para uma segunda instância viva.
-        let existing = Command::new(CTL_BIN)
+impl V4l2Backend {
+    fn list_devices() -> Vec<LoopbackDevice> {
+        Command::new(CTL_BIN)
             .arg("list")
             .output()
             .ok()
             .filter(|o| o.status.success())
             .map(|o| parse_list_output(&String::from_utf8_lossy(&o.stdout)))
-            .unwrap_or_default();
-        let reusable = find_reusable_device(&existing, label);
+            .unwrap_or_default()
+    }
+
+    /// Remove duplicatas do `label` que não sejam `keep` (best-effort:
+    /// `delete` falha com EBUSY se alguém ainda estiver usando o device —
+    /// nesse caso ele fica pra trás e é limpo numa chamada futura, quando o
+    /// consumidor tiver soltado).
+    fn cleanup_duplicates(existing: &[LoopbackDevice], label: &str, keep: Option<&str>) {
         for extra in existing
             .iter()
-            .filter(|d| d.name == label && Some(&d.output) != reusable.as_ref())
+            .filter(|d| d.name == label && Some(d.output.as_str()) != keep)
         {
             match Command::new(CTL_BIN)
                 .args(["delete", &extra.output])
@@ -247,33 +246,34 @@ impl VirtualCameraBackend for V4l2Backend {
                 }
             }
         }
+    }
 
-        let device_path = if let Some(path) = reusable {
-            tracing::info!(%path, "reusando device v4l2 existente");
-            path
-        } else {
-            let output = Command::new(CTL_BIN)
-                .args(build_add_args(label))
-                .output()
-                .map_err(|e| {
-                    VcamError::Backend(format!("falha ao executar v4l2loopback-ctl: {e}"))
-                })?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if let Some(err) = detect_secure_boot_block(&stderr) {
-                    return Err(VcamError::Backend(err.msg));
-                }
-                return Err(VcamError::Backend(format!(
-                    "v4l2loopback-ctl add falhou: {stderr}"
-                )));
+    fn allocate_new_device(label: &str) -> Result<String, VcamError> {
+        let output = Command::new(CTL_BIN)
+            .args(build_add_args(label))
+            .output()
+            .map_err(|e| VcamError::Backend(format!("falha ao executar v4l2loopback-ctl: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if let Some(err) = detect_secure_boot_block(&stderr) {
+                return Err(VcamError::Backend(err.msg));
             }
-            parse_added_device(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
-                VcamError::Backend("saída inesperada de v4l2loopback-ctl add".into())
-            })?
-        };
+            return Err(VcamError::Backend(format!(
+                "v4l2loopback-ctl add falhou: {stderr}"
+            )));
+        }
+        parse_added_device(&String::from_utf8_lossy(&output.stdout))
+            .ok_or_else(|| VcamError::Backend("saída inesperada de v4l2loopback-ctl add".into()))
+    }
 
+    fn finish_create(
+        &mut self,
+        device_path: String,
+        label: &str,
+        resolution: (u32, u32),
+        fps: u32,
+    ) -> Result<VirtualCamera, VcamError> {
         let ffmpeg = Self::spawn_ffmpeg(&device_path, resolution, fps)?;
-
         let camera = VirtualCamera {
             id: Uuid::new_v4(),
             label: label.to_string(),
@@ -290,6 +290,50 @@ impl VirtualCameraBackend for V4l2Backend {
         );
         tracing::info!(id = %camera.id, path = %camera.backend_path, "câmera virtual v4l2 criada");
         Ok(camera)
+    }
+}
+
+impl VirtualCameraBackend for V4l2Backend {
+    fn create(
+        &mut self,
+        label: &str,
+        resolution: (u32, u32),
+        fps: u32,
+    ) -> Result<VirtualCamera, VcamError> {
+        // Reuso de device estável (ver `find_reusable_device`): duplicatas
+        // do mesmo label (sessões antigas mortas sem cleanup) são removidas
+        // best-effort — `delete` falha com EBUSY se alguém estiver usando,
+        // o que já serve de guarda para uma segunda instância viva.
+        let existing = Self::list_devices();
+        let reusable = find_reusable_device(&existing, label);
+        Self::cleanup_duplicates(&existing, label, reusable.as_deref());
+
+        let device_path = if let Some(path) = reusable {
+            tracing::info!(%path, "reusando device v4l2 existente");
+            path
+        } else {
+            Self::allocate_new_device(label)?
+        };
+
+        self.finish_create(device_path, label, resolution, fps)
+    }
+
+    fn create_fresh(
+        &mut self,
+        label: &str,
+        resolution: (u32, u32),
+        fps: u32,
+    ) -> Result<VirtualCamera, VcamError> {
+        // Sem lookup de reuso: o device antigo (se ainda existir) só é
+        // removido best-effort — normalmente falha com EBUSY porque o
+        // consumidor (Chrome/Meet) ainda está com ele aberto, e é isso
+        // mesmo que queremos, já que reaproveitá-lo é o problema que este
+        // método existe pra evitar.
+        let existing = Self::list_devices();
+        Self::cleanup_duplicates(&existing, label, None);
+        let device_path = Self::allocate_new_device(label)?;
+        tracing::info!(path = %device_path, "device v4l2 novo (resolução de saída mudou)");
+        self.finish_create(device_path, label, resolution, fps)
     }
 
     fn feed_frame(&mut self, id: &Uuid, frame: &[u8]) -> Result<(), VcamError> {
@@ -352,5 +396,19 @@ impl VirtualCameraBackend for V4l2Backend {
 
     fn cameras(&self) -> Vec<&VirtualCamera> {
         self.cameras.values().map(|m| &m.camera).collect()
+    }
+
+    fn cleanup_stale(&mut self) {
+        let existing = Self::list_devices();
+        let mut labels: Vec<&str> = existing.iter().map(|d| d.name.as_str()).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        for label in labels {
+            let keep = existing
+                .iter()
+                .find(|d| d.name == label)
+                .map(|d| d.output.as_str());
+            Self::cleanup_duplicates(&existing, label, keep);
+        }
     }
 }

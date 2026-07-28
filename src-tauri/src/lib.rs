@@ -32,7 +32,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex as TokioMutex;
 use uuid::Uuid;
 
-use camera_controller::{ControlClient, ControlEvent, ControlReply, ControlRequest};
+use camera_controller::{
+    ControlClient, ControlErrorCode, ControlEvent, ControlReply, ControlRequest,
+};
 use device_manager::DeviceEvent;
 use error::AppError;
 use model::{
@@ -66,6 +68,16 @@ const RTSP_FPS: u32 = 30;
 const FPS_SMOOTHING: f32 = 0.8;
 /// Timeout de conexão/handshake e de cada request do socket de controle.
 const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Janela total de retry do handshake inicial de controle: o `adb forward`
+/// fica pronto quase instantaneamente, mas o `CamLinkControlServer` no
+/// celular só liga depois do push do jar + boot do `app_process` — a
+/// primeira tentativa de conectar quase sempre perde essa corrida (medido em
+/// hardware: ~600ms–1s até "control server listening"). `adb forward`
+/// aceita a conexão TCP local mesmo sem ninguém ouvindo o socket abstrato no
+/// device e a fecha em seguida — daí `ControlClientError::Closed`, não
+/// `Timeout`, no primeiro request.
+const CONTROL_CONNECT_RETRY_WINDOW: Duration = Duration::from_secs(8);
+const CONTROL_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(300);
 
 fn new_vcam_backend() -> Box<dyn VirtualCameraBackend + Send> {
     #[cfg(target_os = "linux")]
@@ -156,6 +168,28 @@ struct AppState {
     devices: Arc<StdMutex<Vec<AndroidDevice>>>,
     sessions: TokioMutex<HashMap<Uuid, SessionCtx>>,
     rtsp: TokioMutex<HashMap<Uuid, RtspRuntime>>,
+    /// Serializa restarts (`switch_camera`/rotação) por device (FR-015):
+    /// `session_id` muda a cada restart, então o lock não pode viver dentro
+    /// de `SessionCtx` — é chaveado pelo `serial`, estável entre trocas.
+    /// Cada restart mata o `scrcpy-server` remanescente no celular antes de
+    /// subir o novo (`spawn_backend`); dois restarts concorrentes para o
+    /// mesmo device (cliques rápidos em girar/trocar câmera) intercalavam
+    /// esse kill+bind e ainda batiam em "Address already in use" (1 em ~35
+    /// trocas em hardware, 2026-07-24) — o lock garante que cada restart
+    /// termina (stop + spawn) antes do próximo começar.
+    restart_locks: TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>,
+}
+
+/// Lock de restart do device (ver doc de `AppState::restart_locks`):
+/// cria sob demanda, nunca remove (poucos devices distintos por sessão de
+/// uso — não vale a complexidade de recolher entradas).
+async fn restart_lock_for(state: &State<'_, AppState>, serial: &str) -> Arc<TokioMutex<()>> {
+    let mut locks = state.restart_locks.lock().await;
+    Arc::clone(
+        locks
+            .entry(serial.to_string())
+            .or_insert_with(|| Arc::new(TokioMutex::new(()))),
+    )
 }
 
 fn config_path() -> Result<PathBuf, AppError> {
@@ -454,6 +488,44 @@ struct FacesEvent {
     rects: Vec<camera_controller::FaceRect>,
 }
 
+/// Tenta o handshake de controle repetidamente dentro de
+/// `CONTROL_CONNECT_RETRY_WINDOW`: cobre a corrida entre o `adb forward`
+/// (pronto quase na hora) e o `CamLinkControlServer` no celular (só liga
+/// depois do push do jar + boot do `app_process`). Erros de protocolo
+/// (`UnsupportedProtocol`/`Parse`) são persistentes — não adianta retentar —
+/// então saem no primeiro erro; só `Closed`/`Io`/`Timeout` (sintomas de
+/// "servidor ainda não subiu") são retentados.
+async fn connect_control_with_retry(
+    port: u16,
+) -> Result<
+    (
+        camera_controller::ControlClient,
+        tokio::sync::mpsc::Receiver<ControlEvent>,
+    ),
+    camera_controller::ControlClientError,
+> {
+    let deadline = tokio::time::Instant::now() + CONTROL_CONNECT_RETRY_WINDOW;
+    loop {
+        match ControlClient::connect(("127.0.0.1", port), CONTROL_CONNECT_TIMEOUT).await {
+            Ok(pair) => return Ok(pair),
+            Err(camera_controller::ControlClientError::UnsupportedProtocol { got }) => {
+                return Err(camera_controller::ControlClientError::UnsupportedProtocol { got })
+            }
+            Err(camera_controller::ControlClientError::Parse(msg)) => {
+                return Err(camera_controller::ControlClientError::Parse(msg))
+            }
+            Err(e) if tokio::time::Instant::now() >= deadline => return Err(e),
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "handshake de controle falhou, tentando de novo (servidor pode ainda estar subindo)"
+                );
+                tokio::time::sleep(CONTROL_CONNECT_RETRY_DELAY).await;
+            }
+        }
+    }
+}
+
 /// Garante o canal de controle da sessão: `adb forward tcp:0` (porta
 /// efêmera alocada pelo adb) + handshake `hello`. Reaproveitado entre
 /// comandos; morre junto com o subprocess (restart limpa `ctx.control`).
@@ -492,14 +564,12 @@ async fn ensure_control(
         )
     })?;
 
-    let (client, mut events) = ControlClient::connect(("127.0.0.1", port), CONTROL_CONNECT_TIMEOUT)
-        .await
-        .map_err(|e| {
-            AppError::new("control_connect_failed", e.to_string()).with_hint(
-                "O stream precisa estar ativo com o scrcpy-server-camlink (fork) — \
-                     confira SCRCPY_SERVER_PATH.",
-            )
-        })?;
+    let (client, mut events) = connect_control_with_retry(port).await.map_err(|e| {
+        AppError::new("control_connect_failed", e.to_string()).with_hint(
+            "O stream precisa estar ativo com o scrcpy-server-camlink (fork) — \
+                 confira SCRCPY_SERVER_PATH.",
+        )
+    })?;
 
     // Encaminha eventos assíncronos do fork para o frontend (contrato §5).
     let app_events = app.clone();
@@ -534,6 +604,36 @@ fn reply_to_result(reply: ControlReply) -> Result<serde_json::Value, AppError> {
     }
 }
 
+/// `get_capabilities` logo após `ensure_control` pode alcançar o fork antes
+/// da câmera terminar de abrir no celular: `CameraCapture.camlinkGetCameraId()`
+/// é `null` até `init()` completar, e nesse meio-tempo o fork responde
+/// `CAMERA_ERROR` ("Expected cameraId to be numeric, but it was: null") em
+/// vez do BUSY que o caso pediria — mesma corrida do handshake de conexão
+/// (`connect_control_with_retry`), só que uma camada acima. Retenta dentro
+/// da mesma janela; qualquer outro código de erro (ou sucesso) volta na
+/// hora.
+async fn get_capabilities_with_retry(
+    client: &mut ControlClient,
+) -> Result<ControlReply, camera_controller::ControlClientError> {
+    let deadline = tokio::time::Instant::now() + CONTROL_CONNECT_RETRY_WINDOW;
+    loop {
+        let reply = client.request(ControlRequest::GetCapabilities).await?;
+        match &reply {
+            ControlReply::Err {
+                code: ControlErrorCode::CameraError,
+                msg,
+            } if tokio::time::Instant::now() < deadline => {
+                tracing::debug!(
+                    msg,
+                    "get_capabilities falhou com CAMERA_ERROR, tentando de novo (câmera pode ainda estar abrindo)"
+                );
+                tokio::time::sleep(CONTROL_CONNECT_RETRY_DELAY).await;
+            }
+            _ => return Ok(reply),
+        }
+    }
+}
+
 /// FR-016: capabilities reais do aparelho, consultadas via fork (exige um
 /// stream ativo — a sessão de câmera pertence ao scrcpy-server).
 #[tauri::command]
@@ -555,8 +655,7 @@ async fn get_capabilities(
         })?;
     ensure_control(&app, *session_id, ctx).await?;
     let client = ctx.control.as_mut().expect("ensure_control garantiu");
-    let reply = client
-        .request(ControlRequest::GetCapabilities)
+    let reply = get_capabilities_with_retry(client)
         .await
         .map_err(|e| AppError::new("control_request_failed", e.to_string()))?;
     let data = reply_to_result(reply)?;
@@ -710,7 +809,11 @@ async fn set_orientation(
     }
 
     // Caminho de restart (Linux sempre; Windows quando muda o lado):
-    // reaproveita o fluxo do switch_camera (FR-015, ≤ 2 s).
+    // reaproveita o fluxo do switch_camera (FR-015, ≤ 2 s). Device v4l2
+    // novo só quando o giro realmente troca largura×altura (90°/270°) —
+    // espelho puro e giro 0°/180° não mudam dimensão, então o device atual
+    // continua servindo sem custo de reseleção pro consumidor.
+    let dims_changed = target.0.swaps_dimensions() != current.0.swaps_dimensions();
     *orientation_cell.lock().unwrap() = target;
     let response = restart_android_session(
         app.clone(),
@@ -721,6 +824,7 @@ async fn set_orientation(
         vcam_id,
         orientation_cell,
         control_state.clone(),
+        dims_changed,
     )
     .await?;
     // `set_control` devolve `ControlState` (contrato) — o novo session_id do
@@ -775,6 +879,14 @@ async fn switch_camera(
         )
     };
     config.camera_id = camera_id;
+    // `config.resolution` é a mesma pedida pras duas câmeras (só o
+    // `camera_id` muda) — FR-015 exige que o device v4l2 sobreviva à troca
+    // pra não pedir reseleção no Meet/OBS a cada clique em
+    // Frontal/Traseira. Um device novo aqui (`force_fresh_vcam=true`) foi
+    // tentado como blindagem extra contra uma câmera física entregar
+    // resolução diferente, mas o custo (reseleção obrigatória a CADA troca,
+    // mesmo quando a resolução não muda — o caso comum) não compensou:
+    // usuário confirmou em hardware que quebrava a persistência esperada.
     restart_android_session(
         app,
         &state,
@@ -784,6 +896,7 @@ async fn switch_camera(
         vcam_id,
         orientation_cell,
         control_state,
+        false,
     )
     .await
 }
@@ -792,6 +905,20 @@ async fn switch_camera(
 /// virtual se as dimensões de saída mudaram (rotação 90°/270°) e religa o
 /// pipeline. O canal de controle antigo morre com o subprocess — o próximo
 /// comando reconecta.
+///
+/// `force_fresh_vcam`: quando a resolução de saída MUDA de fato (só o giro
+/// 90°/270°, que inverte largura×altura — `switch_camera` mantém
+/// `config.resolution` igual pras duas câmeras, FR-015), o device v4l2
+/// precisa ser um NOVO `/dev/videoN` (`create_fresh`) em vez de reaproveitar
+/// o atual — o v4l2loopback trava o formato do device enquanto um
+/// consumidor (Chrome/Meet) ainda o mantém aberto, e um writer novo com
+/// resolução diferente é silenciosamente ignorado, corrompendo os frames
+/// até o consumidor reselecionar a câmera manualmente (achado em bancada
+/// 2026-07-27). Fora desse caso certo (giro 0°/180°, espelho, troca de
+/// câmera) o device é sempre reaproveitado — forçar novo a cada troca de
+/// câmera "pra garantir" foi tentado e piorou a experiência comum (exigia
+/// reseleção a cada clique em Frontal/Traseira, mesmo sem a resolução ter
+/// mudado — confirmado em hardware 2026-07-27).
 #[allow(clippy::too_many_arguments)]
 async fn restart_android_session(
     app: AppHandle,
@@ -802,7 +929,11 @@ async fn restart_android_session(
     vcam_id: Uuid,
     orientation_cell: Arc<StdMutex<(Rotation, bool)>>,
     control_state: ControlState,
+    force_fresh_vcam: bool,
 ) -> Result<StartStreamResponse, AppError> {
+    let lock = restart_lock_for(state, &serial).await;
+    let _restart_guard = lock.lock().await;
+
     state.stream_manager.stop(old_session_id).await?;
     state.sessions.lock().await.remove(&old_session_id);
 
@@ -813,18 +944,23 @@ async fn restart_android_session(
         config.resolution
     };
 
+    let can_reuse = cfg!(target_os = "linux") && !force_fresh_vcam;
     let virtual_camera = {
         let mut vcam = state.vcam.lock().unwrap();
         let existing = vcam.camera(&vcam_id).cloned();
         match existing {
             // Windows negocia o media type da câmera nas dimensões de
-            // criação; 90°/270° exigem recriar (FR-016a). No Linux o writer
-            // renegocia a geometria — o device pode ficar.
-            Some(cam) if cfg!(target_os = "linux") => cam,
+            // criação; 90°/270° exigem recriar (FR-016a). No Linux, quando
+            // a resolução não muda, o device pode ficar.
+            Some(cam) if can_reuse => cam,
             _ => {
                 let _ = vcam.destroy(&vcam_id);
-                vcam.create(VIRTUAL_CAMERA_LABEL, output_dims, config.fps)
-                    .map_err(|e| AppError::new("vcam_create_failed", e.to_string()))?
+                if cfg!(target_os = "linux") && force_fresh_vcam {
+                    vcam.create_fresh(VIRTUAL_CAMERA_LABEL, output_dims, config.fps)
+                } else {
+                    vcam.create(VIRTUAL_CAMERA_LABEL, output_dims, config.fps)
+                }
+                .map_err(|e| AppError::new("vcam_create_failed", e.to_string()))?
             }
         }
     };
@@ -1245,6 +1381,41 @@ fn spawn_device_polling(app: AppHandle, adb_path: PathBuf) {
     });
 }
 
+/// Espera SIGINT/Ctrl+C (e SIGTERM no Unix) e mata à força qualquer backend
+/// ainda rodando antes de sair — cobre o processo inteiro sendo morto
+/// (terminal fechado, Ctrl+C, `pnpm`/`cargo run` não repassando o sinal
+/// pros filhos), caso em que `kill_on_drop(true)` nunca chega a rodar
+/// porque não há shutdown gracioso do processo Rust (achado em bancada
+/// 2026-07-28: `scrcpy` órfão continuava escrevendo no device v4l2 mesmo
+/// com o app "fechado"). `std::process::exit` no fim é necessário porque
+/// `tauri::Builder::run` bloqueia a thread principal no próprio loop de
+/// eventos da janela — sem isso o processo nunca voltaria a ler o
+/// resultado deste `select!` pra realmente encerrar.
+async fn watch_for_shutdown_signal(stream_manager: StreamManager) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+    tracing::info!("sinal de encerramento recebido; matando backends ativos");
+    stream_manager.kill_all_backends().await;
+    std::process::exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Tauri não entra sozinho num runtime Tokio (o loop de eventos da
@@ -1258,12 +1429,16 @@ pub fn run() {
     let _runtime_guard = runtime.enter();
 
     let adb_path = PathBuf::from("adb");
+    let stream_manager = StreamManager::new(resolve_external_paths());
+    runtime.spawn(watch_for_shutdown_signal(stream_manager.clone()));
+    let stream_manager_for_exit = stream_manager.clone();
     let app_state = AppState {
-        stream_manager: StreamManager::new(resolve_external_paths()),
+        stream_manager,
         vcam: Arc::new(StdMutex::new(new_vcam_backend())),
         devices: Arc::new(StdMutex::new(Vec::new())),
         sessions: TokioMutex::new(HashMap::new()),
         rtsp: TokioMutex::new(HashMap::new()),
+        restart_locks: TokioMutex::new(HashMap::new()),
     };
 
     tauri::Builder::default()
@@ -1285,8 +1460,22 @@ pub fn run() {
             start_rtsp,
             stop_rtsp
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |_app_handle, event| {
+            // Fechar a janela normalmente (botão X, `app.exit()`) NÃO passa
+            // por sinal nenhum do SO — o tauri chama `std::process::exit`
+            // internamente no fim do próprio loop de eventos, pulando o
+            // `Drop` de tudo que ainda estiver vivo na stack/heap (inclusive
+            // `kill_on_drop` dos `Child` de backend). `watch_for_shutdown_signal`
+            // só cobre o processo inteiro morrendo por sinal externo
+            // (Ctrl+C, `kill`); este hook cobre o outro caminho de saída
+            // (achado em bancada 2026-07-28: `scrcpy` órfão sobrevivia
+            // mesmo fechando a janela do app normalmente).
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                tauri::async_runtime::block_on(stream_manager_for_exit.kill_all_backends());
+            }
+        });
 }
 
 #[cfg(test)]

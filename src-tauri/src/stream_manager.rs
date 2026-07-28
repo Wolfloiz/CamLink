@@ -395,6 +395,45 @@ async fn spawn_backend(
     #[cfg(target_os = "linux")]
     {
         let _ = session_id;
+        // Mata qualquer scrcpy-server remanescente no device ANTES de subir
+        // um novo: o `child.start_kill()` usado em stop()/reconexão é SIGKILL
+        // no cliente LOCAL, que nunca chega a avisar o servidor no celular —
+        // o `app_process` remoto sobrevive até notar sozinho a conexão
+        // quebrada (tempo variável). Se o próximo start/restart for rápido
+        // demais, o `CamLinkControlServer` novo colide no bind do socket
+        // `localabstract:camlink` com o antigo ainda vivo (`Address already
+        // in use` — encontrado em hardware ao trocar de câmera/girar,
+        // 2026-07-24; câmera é exclusiva por device mesmo, então matar
+        // qualquer scrcpy-server pré-existente aqui é seguro). Best-effort:
+        // sem processo pra matar (`pkill` sem match) é o caso comum, não erro.
+        let _ = crate::procutil::hide_console(Command::new(&paths.adb))
+            .args(["shell", "pkill", "-f", "com.genymobile.scrcpy.Server"])
+            .envs(paths.extra_env.iter().cloned())
+            .output()
+            .await;
+        // `pkill` só entrega o sinal — não espera o processo morrer de fato.
+        // Sob troca de câmera/rotação MUITO rápida e repetida (hardware,
+        // 2026-07-27), o intervalo entre "sinal enviado" e "processo/socket
+        // realmente liberado" ainda bastava pra colidir com o bind do
+        // próximo `CamLinkControlServer` ("Address already in use") e até
+        // pra dois `app_process` disputarem a câmera na Camera2 HAL
+        // (`CameraAccessException ... Function not implemented (-38)`).
+        // Poll curto e limitado (pgrep vazio = já morreu) fecha essa janela
+        // sem arriscar travar o restart caso o processo já tenha saído
+        // sozinho (`pgrep` sem match é o caso comum).
+        for _ in 0..10 {
+            let still_alive = crate::procutil::hide_console(Command::new(&paths.adb))
+                .args(["shell", "pgrep", "-f", "com.genymobile.scrcpy.Server"])
+                .envs(paths.extra_env.iter().cloned())
+                .output()
+                .await
+                .map(|o| !o.stdout.is_empty())
+                .unwrap_or(false);
+            if !still_alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         let args = build_scrcpy_client_args_oriented(
             config,
             virtual_camera_target,
@@ -912,17 +951,29 @@ fn io_err(e: std::io::Error) -> AppError {
 /// device — é o que alimenta preview e fps (que nunca funcionavam no Linux:
 /// o sink jamais era chamado). Cancela qualquer pipeline anterior da mesma
 /// sessão antes de subir um novo (ver doc de `SessionControl::video_pipeline`).
+///
+/// `orientation` importa só no Linux: com rotação 90°/270°, o celular já
+/// entrega o vídeo girado no device via `--capture-orientation`
+/// (`spawn_backend`/`capture_orientation_value`) — as dimensões REAIS do
+/// device são as trocadas, não `config.resolution` cru. Usar o valor cru
+/// aqui (como antes) desalinha o `(pw,ph)` marcado no frame de preview
+/// (calculado com as dimensões trocadas em `wire_android_session`, `lib.rs`)
+/// do tamanho real do buffer lido pelo ffmpeg (calculado sem a troca aqui),
+/// e `encode_preview_jpeg` rejeita todo frame com "tamanho do frame não
+/// bate" (encontrado em hardware ao trocar de câmera/girar, 2026-07-24).
 #[allow(unused_variables)]
 async fn maybe_spawn_video_pipeline(
     paths: &ExternalPaths,
     forward_port: Option<u16>,
     config: &StreamConfig,
+    orientation: (Rotation, bool),
     virtual_camera_target: &str,
     video_sink: Option<&FrameSink>,
     control: &SessionControl,
 ) {
     #[cfg(target_os = "windows")]
     {
+        let _ = orientation;
         if let (Some(port), Some(sink)) = (forward_port, video_sink) {
             let ffmpeg_path = paths.ffmpeg.clone();
             let fps = config.fps;
@@ -938,7 +989,11 @@ async fn maybe_spawn_video_pipeline(
         if let Some(sink) = video_sink {
             let ffmpeg_path = paths.ffmpeg.clone();
             let device = virtual_camera_target.to_string();
-            let resolution = config.resolution;
+            let resolution = if orientation.0.swaps_dimensions() {
+                (config.resolution.1, config.resolution.0)
+            } else {
+                config.resolution
+            };
             let sink = Arc::clone(sink);
             let handle = tokio::spawn(async move {
                 run_preview_pipeline(ffmpeg_path, device, resolution, sink).await;
@@ -1028,6 +1083,11 @@ struct RunningSession {
 
 /// Orquestra o lifecycle das sessões de stream: start/stop e reconexão
 /// automática em caso de crash transitório do backend (FR-005/006).
+///
+/// `Clone` é barato (`Arc` + `ExternalPaths` que já é `Clone`) — usado pra
+/// dar ao watcher de shutdown (`run()`, lib.rs) um handle independente do
+/// que fica dentro do `AppState` gerenciado pelo Tauri.
+#[derive(Clone)]
 pub struct StreamManager {
     paths: ExternalPaths,
     sessions: Arc<Mutex<HashMap<Uuid, RunningSession>>>,
@@ -1107,6 +1167,7 @@ impl StreamManager {
             &self.paths,
             forward_port,
             &config,
+            orientation,
             virtual_camera_target,
             video_sink.as_ref(),
             &control,
@@ -1172,6 +1233,35 @@ impl StreamManager {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// Mata à força todos os processos-filho de sessões ativas, sem passar
+    /// pelo fluxo graceful de `stop()` — usado só no shutdown do processo
+    /// (SIGINT/SIGTERM/Ctrl+C chegando direto no `camlink`; ver
+    /// `watch_for_shutdown_signal`, lib.rs). `kill_on_drop(true)` no spawn
+    /// só mata o filho quando o `Child` é dropado durante um shutdown
+    /// GRACIOSO do processo Rust — quando o processo inteiro morre por
+    /// sinal (Ctrl+C no terminal, `pnpm`/`cargo run` não repassando o
+    /// sinal adiante — comum nesse wrapper) esse `Drop` nunca roda, e o
+    /// `scrcpy` local (e o `app_process` remoto atrás dele) ficava vivo
+    /// escrevendo no device mesmo com o app "fechado" (achado em bancada
+    /// 2026-07-28). Best-effort: o processo está saindo de qualquer forma.
+    pub async fn kill_all_backends(&self) {
+        let mut sessions = self.sessions.lock().await;
+        for running in sessions.values_mut() {
+            if let Some(child) = running.child.as_mut() {
+                let _ = child.start_kill();
+            }
+        }
+        drop(sessions);
+        // Mesmo raciocínio do cleanup pré-emptivo em `spawn_backend`: o
+        // kill local não garante que o `app_process` remoto já notou a
+        // queda a tempo, então também derruba ele direto.
+        let _ = crate::procutil::hide_console(Command::new(&self.paths.adb))
+            .args(["shell", "pkill", "-f", "com.genymobile.scrcpy.Server"])
+            .envs(self.paths.extra_env.iter().cloned())
+            .output()
+            .await;
     }
 
     pub async fn state(&self, session_id: Uuid) -> Option<SessionState> {
@@ -1415,6 +1505,7 @@ async fn monitor_session(
                                     &paths,
                                     forward_port,
                                     &config,
+                                    orientation,
                                     &virtual_camera_target,
                                     video_sink.as_ref(),
                                     &control,
