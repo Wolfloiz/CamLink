@@ -167,7 +167,13 @@ struct AppState {
     vcam: Arc<StdMutex<Box<dyn VirtualCameraBackend + Send>>>,
     devices: Arc<StdMutex<Vec<AndroidDevice>>>,
     sessions: TokioMutex<HashMap<Uuid, SessionCtx>>,
-    rtsp: TokioMutex<HashMap<Uuid, RtspRuntime>>,
+    /// `Arc` (não só `TokioMutex`) pra dar aos hooks de shutdown (sinal OS +
+    /// `RunEvent::ExitRequested`) um handle independente do `AppState`
+    /// gerenciado pelo Tauri — mesmo motivo do `StreamManager` ser `Clone`
+    /// (ver `run()`): sem isso o `ffmpeg` de uma sessão RTSP ativa ficava
+    /// órfão ao fechar o app, igual ao bug do `scrcpy` (2026-07-28), só que
+    /// não coberto porque `kill_all_backends` só conhece o `StreamManager`.
+    rtsp: Arc<TokioMutex<HashMap<Uuid, RtspRuntime>>>,
     /// Serializa restarts (`switch_camera`/rotação) por device (FR-015):
     /// `session_id` muda a cada restart, então o lock não pode viver dentro
     /// de `SessionCtx` — é chaveado pelo `serial`, estável entre trocas.
@@ -1391,7 +1397,10 @@ fn spawn_device_polling(app: AppHandle, adb_path: PathBuf) {
 /// `tauri::Builder::run` bloqueia a thread principal no próprio loop de
 /// eventos da janela — sem isso o processo nunca voltaria a ler o
 /// resultado deste `select!` pra realmente encerrar.
-async fn watch_for_shutdown_signal(stream_manager: StreamManager) {
+async fn watch_for_shutdown_signal(
+    stream_manager: StreamManager,
+    rtsp: Arc<TokioMutex<HashMap<Uuid, RtspRuntime>>>,
+) {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -1413,7 +1422,23 @@ async fn watch_for_shutdown_signal(stream_manager: StreamManager) {
     }
     tracing::info!("sinal de encerramento recebido; matando backends ativos");
     stream_manager.kill_all_backends().await;
+    kill_all_rtsp(&rtsp).await;
     std::process::exit(0);
+}
+
+/// Mata os `ffmpeg` de todas as sessões RTSP ativas sem tocar no device
+/// v4l2/dshow em si (persiste pro próximo start, mesma lógica de
+/// `kill_all_backends` pro lado Android) — usado só nos dois hooks de
+/// shutdown do processo inteiro, nunca no fluxo normal de `stop_rtsp`
+/// (que já limpa certo via `teardown_rtsp_runtime`).
+async fn kill_all_rtsp(rtsp: &Arc<TokioMutex<HashMap<Uuid, RtspRuntime>>>) {
+    let mut sessions = rtsp.lock().await;
+    for (_, runtime) in sessions.drain() {
+        if let Some(preview) = runtime.preview_task {
+            preview.abort();
+        }
+        runtime.session.stop().await;
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1430,14 +1455,20 @@ pub fn run() {
 
     let adb_path = PathBuf::from("adb");
     let stream_manager = StreamManager::new(resolve_external_paths());
-    runtime.spawn(watch_for_shutdown_signal(stream_manager.clone()));
+    let rtsp_sessions: Arc<TokioMutex<HashMap<Uuid, RtspRuntime>>> =
+        Arc::new(TokioMutex::new(HashMap::new()));
+    runtime.spawn(watch_for_shutdown_signal(
+        stream_manager.clone(),
+        Arc::clone(&rtsp_sessions),
+    ));
     let stream_manager_for_exit = stream_manager.clone();
+    let rtsp_for_exit = Arc::clone(&rtsp_sessions);
     let app_state = AppState {
         stream_manager,
         vcam: Arc::new(StdMutex::new(new_vcam_backend())),
         devices: Arc::new(StdMutex::new(Vec::new())),
         sessions: TokioMutex::new(HashMap::new()),
-        rtsp: TokioMutex::new(HashMap::new()),
+        rtsp: rtsp_sessions,
         restart_locks: TokioMutex::new(HashMap::new()),
     };
 
@@ -1473,7 +1504,10 @@ pub fn run() {
             // (achado em bancada 2026-07-28: `scrcpy` órfão sobrevivia
             // mesmo fechando a janela do app normalmente).
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                tauri::async_runtime::block_on(stream_manager_for_exit.kill_all_backends());
+                tauri::async_runtime::block_on(async {
+                    stream_manager_for_exit.kill_all_backends().await;
+                    kill_all_rtsp(&rtsp_for_exit).await;
+                });
             }
         });
 }
