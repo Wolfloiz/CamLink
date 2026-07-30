@@ -1,0 +1,126 @@
+# Teste manual US2
+
+Fabricante 1 - Samsung
+    Modelo: s20 FE
+     Camera traseira
+     - Zoom fucionou bem com o slide
+     - Exposição o slide causa efeito na iagem a  minha pergunta é possivel aprimorar deixa mais profissional? o celular calibra automatico?
+     - O balanço de branco acontece mas achei bastante generico, teria como buscar algo mais profissional? ou vem do celular?
+     - A estabilização não consegui testar com precisão...
+     - Lanterna on e off ok
+     - Ao girar a camera para de mostrar qualquer imagem da camera e do lado do botão iniciar aparece idle o fps cai bastante no preview e não aparece no obs studio
+     - Ao espelhar está aparecendo a imagem no preview toda serrilhada as vezes volta ao normal  mas fica intermmitente
+
+     Bug encontrados:
+    - Percebi que ao perder a conexão por temtar girar a camera e tentar voltar  os frames reduzem consideralvelmente
+    - Ao tentar retomar a camera após girar comeõs a aparecer varias reconeçxoes sempre e deixando o fps baixo e só resolvendo fechando e abrindo novamente
+    - Ao para a conexão e iniciar novamente apareceu o seguinte erro: Controles indisponíveis: conexão de controle encerrada pelo servidor.
+    - ao ver os logs ficou loop eterno (anexo 1)
+    - Ao tentar girar(parou) e tentar iniciar novamente apareceu os logs no anexo 2.
+
+
+
+    ## Anexo 1
+```
+    2026-07-30T00:36:52.140819Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Using camera '0'
+2026-07-30T00:36:52.465715Z  WARN camlink_lib::stream_manager: backend stderr stderr=WARN: Device disconnected
+2026-07-30T00:36:52.467480Z  WARN camlink_lib::stream_manager: backend stderr stderr=Terminated
+2026-07-30T00:36:52.472063Z  INFO camlink_lib::stream_manager: backend stdout stdout=scrcpy 4.0 <https://github.com/Genymobile/scrcpy>
+2026-07-30T00:36:52.472094Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO: ADB device found:
+2026-07-30T00:36:52.472104Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO:     -->   (usb)  RQCT903PD5B                     device  SM_G781B
+2026-07-30T00:36:52.472111Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO: v4l2 sink started to device: /dev/video6
+2026-07-30T00:36:53.117409Z  INFO camlink_lib::stream_manager: backend stdout stdout=/home/luiz/.local/share/scrcpy/scrcpy-server: 1 file pushed, 0 skipped. 287.0 MB/s (739850 bytes in 0.002s)
+2026-07-30T00:36:53.213232Z  INFO camlink_lib::stream_manager: backend stdout stdout=/home/luiz/.local/share/scrcpy/scrcpy-server: 1 file pushed, 0 skipped. 350.2 MB/s (739850 bytes in 0.002s)
+2026-07-30T00:36:53.235053Z  WARN camlink_lib::stream_manager: backend stderr stderr=bind: Address already in use
+2026-07-30T00:36:53.257607Z  WARN camlink_lib::stream_manager: backend stderr stderr=WARN: Could not listen on port 27183, retrying on 27184
+2026-07-30T00:36:53.454420Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Device: [samsung] samsung SM-G781B (Android 13)
+2026-07-30T00:36:53.509432Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: CamLink control server listening on localabstract:camlink
+2026-07-30T00:36:53.557453Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Using camera '0'
+2026-07-30T00:36:53.588306Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Device: [samsung] samsung SM-G781B (Android 13)
+2026-07-30T00:36:53.648934Z  WARN camlink_lib::stream_manager: backend stderr stderr=[server] WARN: CamLink control server could not start: Address already in use
+2026-07-30T00:36:53.693184Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Using camera '0'
+2026-07-30T00:36:53.701458Z  WARN camlink_lib::stream_manager: backend stderr stderr=[server] WARN: Camera disconnected
+2026-07-30T00:36:53.732101Z  WARN camlink_lib::stream_manager: backend stderr stderr=[server] ERROR: Camera configuration error
+2026-07-30T00:36:53.737205Z  WARN camlink_lib::stream_manager: backend stderr stderr=[server] ERROR: Capture/encoding error: java.io.IOException: android.hardware.camera2.CameraAccessException: CAMERA_DISCONNECTED (2): checkPidStatus:2377: The camera device has been disconnected
+2026-07-30T00:36:53.756188Z  WARN camlink_lib::stream_manager: backend stderr stderr=[server] ERROR: Video encoding error
+2026-07-30T00:36:53.757366Z  WARN camlink_lib::stream_manager: backend stderr stderr=java.io.IOException: android.hardware.camera2.CameraAccessException: CAMERA_DISCONNECTED (2): checkPidStatus:2377: The camera device has been disconnected
+2026-07-30T00:36:53.757390Z  WARN camlink_lib::stream_manager: backend stderr stderr=   at com.genymobile.scrcpy.video.CameraCapture.start(CameraCapture.java:347)
+2026-07-30T00:36:53.757401Z  WARN camlink_lib::stream_manager: backend stderr stderr=   at com.genymobile.scrcpy.video.SurfaceEncoder.streamCapture(SurfaceEncoder.java:135)
+2026-07-30T00:36:53.757414Z  WARN camlink_lib::stream_manager: backend stderr stderr=   at com.genymobile.scrcpy.video.SurfaceEncoder.lambda$start$0$com-genymobile-scrcpy-video-SurfaceEncoder(SurfaceEncoder.java:350)
+2026-07-30T00:36:53.757433Z  WARN camlink_lib::stream_manager: backend stderr stderr=   at com.genymobile.scrcpy.video.SurfaceEncoder$$ExternalSyntheticLambda0.run(D8$$SyntheticClass:0)
+2026-07-30T00:36:53.757442Z  WARN camlink_lib::stream_manager: backend stderr stderr=   at java.lang.Thread.run(Thread.java:1119)
+2026-07-30T00:36:53.757453Z  WARN camlink_lib::stream_manager: backend stderr stderr=Caused by: android.hardware.camera2.CameraAccessException: CAMERA_DISCONNECTED (2): checkPidStatus:2377: The camera device has been disconnected
+2026-07-30T00:36:53.757463Z  WARN camlink_lib::stream_manager: backend stderr stderr=   at android.hardware.camera2.CameraManager.throwAsPublicException(CameraManager.java:1758)
+2026-07-30T00:36:53.757473Z  WARN camlink_lib::stream_manager: backend stderr stderr=   at android.hardware.camera2.impl.ICameraDeviceUserWrapper.waitUntilIdle(ICameraDeviceUserWrapper.java:184)
+2026-07-30T00:36:53.757481Z  WARN camlink_lib::stream_manager: backend stderr stderr=   at android.hardware.camera2.impl.CameraDeviceImpl.waitUntilIdle(CameraDeviceImpl.java:1401)
+2026-07-30T00:36:53.757490Z  WARN camlink_lib::stream_manager: backend stderr stderr=   at android.hardware.camera2.impl.CameraDeviceImpl.configureStreamsChecked(CameraDeviceImpl.java:475)
+2026-07-30T00:36:53.757499Z  WARN camlink_lib::stream_manager: backend stderr stderr=   at android.hardware.camera2.impl.CameraDeviceImpl.createCaptureSessionInternal(CameraDeviceImpl.java:723)
+2026-07-30T00:36:53.757509Z  WARN camlink_lib::stream_manager: backend stderr stderr=   at android.hardware.camera2.impl.CameraDeviceImpl.createCaptureSession(CameraDeviceImpl.java:677)
+2026-07-30T00:36:53.757517Z  WARN camlink_lib::stream_manager: backend stderr stderr=   at com.genymobile.scrcpy.FakeContext$$ExternalSyntheticApiModelOutline0.m(D8$$SyntheticClass:0)
+2026-07-30T00:36:53.757528Z  WARN camlink_lib::stream_manager: backend stderr stderr=   at com.genymobile.scrcpy.video.CameraCapture.start(CameraCapture.java:344)
+2026-07-30T00:36:53.757541Z  WARN camlink_lib::stream_manager: backend stderr stderr=   ... 4 more
+2026-07-30T00:36:53.757550Z  WARN camlink_lib::stream_manager: backend stderr stderr=Caused by: android.os.ServiceSpecificException: checkPidStatus:2377: The camera device has been disconnected (code 4)
+```
+
+## Anexo 2
+
+```
+2026-07-30T00:39:45.960487Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Device: [samsung] samsung SM-G781B (Android 13)
+2026-07-30T00:39:46.012235Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: CamLink control server listening on localabstract:camlink
+2026-07-30T00:39:46.049499Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Using camera '0'
+2026-07-30T00:39:46.914424Z  INFO camlink_lib::stream_manager: preview capturando snapshots device=/dev/video6
+2026-07-30T00:39:59.076417Z  INFO camlink_lib::virtualcam::v4l2: reusando device v4l2 existente path=/dev/video6
+2026-07-30T00:39:59.076987Z  INFO camlink_lib::virtualcam::v4l2: câmera virtual v4l2 criada id=3105c720-7277-4724-a9b4-af795ccbf47b path=/dev/video6
+2026-07-30T00:39:59.222955Z  WARN camlink_lib::stream_manager: backend stderr stderr=WARN: Device disconnected
+2026-07-30T00:39:59.228178Z  WARN camlink_lib::stream_manager: backend stderr stderr=Terminated
+2026-07-30T00:39:59.232259Z  INFO camlink_lib::stream_manager: backend stdout stdout=scrcpy 4.0 <https://github.com/Genymobile/scrcpy>
+2026-07-30T00:39:59.232287Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO: ADB device found:
+2026-07-30T00:39:59.232304Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO:     -->   (usb)  RQCT903PD5B                     device  SM_G781B
+2026-07-30T00:39:59.232313Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO: v4l2 sink started to device: /dev/video6
+2026-07-30T00:39:59.494124Z  INFO camlink_lib::stream_manager: preview sem acesso ao device (consumidor ativo ou writer fora) — cedendo o slot device=/dev/video6 reason=sem frame: early eof
+2026-07-30T00:39:59.531773Z  INFO camlink_lib::stream_manager: backend stdout stdout=/home/luiz/.local/share/scrcpy/scrcpy-server: 1 file pushed, 0 skipped. 393.2 MB/s (739850 bytes in 0.002s)
+2026-07-30T00:39:59.798158Z  INFO camlink_lib::stream_manager: backend stdout stdout=/home/luiz/.local/share/scrcpy/scrcpy-server: 1 file pushed, 0 skipped. 404.9 MB/s (739850 bytes in 0.002s)
+2026-07-30T00:39:59.814870Z  WARN camlink_lib::stream_manager: backend stderr stderr=bind: Address already in use
+2026-07-30T00:39:59.828935Z  WARN camlink_lib::stream_manager: backend stderr stderr=WARN: Could not listen on port 27183, retrying on 27184
+2026-07-30T00:40:00.028712Z  WARN camlink_lib::stream_manager: backend stderr stderr=Aborted
+2026-07-30T00:40:00.036925Z  WARN camlink_lib::stream_manager: backend stderr stderr=ERROR: Server connection failed
+2026-07-30T00:40:00.038140Z  INFO camlink_lib::stream_manager: backend stdout stdout=scrcpy 4.0 <https://github.com/Genymobile/scrcpy>
+2026-07-30T00:40:00.038252Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO: ADB device found:
+2026-07-30T00:40:00.038274Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO:     -->   (usb)  RQCT903PD5B                     device  SM_G781B
+2026-07-30T00:40:00.153538Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Device: [samsung] samsung SM-G781B (Android 13)
+2026-07-30T00:40:00.205975Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: CamLink control server listening on localabstract:camlink
+2026-07-30T00:40:00.241525Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Using camera '0'
+2026-07-30T00:40:00.507700Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: CamLink control client connected
+2026-07-30T00:40:00.538040Z  WARN camlink_lib::stream_manager: backend stderr stderr=ERROR: Demuxer error
+2026-07-30T00:40:00.540038Z  WARN camlink_lib::stream_manager: backend stderr stderr=Terminated
+2026-07-30T00:40:00.544953Z  INFO camlink_lib::stream_manager: backend stdout stdout=scrcpy 4.0 <https://github.com/Genymobile/scrcpy>
+2026-07-30T00:40:00.544974Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO: ADB device found:
+2026-07-30T00:40:00.544985Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO:     -->   (usb)  RQCT903PD5B                     device  SM_G781B
+2026-07-30T00:40:00.814735Z  INFO camlink_lib::stream_manager: backend stdout stdout=/home/luiz/.local/share/scrcpy/scrcpy-server: 1 file pushed, 0 skipped. 424.4 MB/s (739850 bytes in 0.002s)
+2026-07-30T00:40:01.071251Z  WARN camlink_lib::stream_manager: backend stderr stderr=Terminated
+2026-07-30T00:40:01.090000Z  WARN camlink_lib::stream_manager: backend stderr stderr=ERROR: Server connection failed
+2026-07-30T00:40:01.093396Z  INFO camlink_lib::stream_manager: backend stdout stdout=scrcpy 4.0 <https://github.com/Genymobile/scrcpy>
+2026-07-30T00:40:01.093496Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO: ADB device found:
+2026-07-30T00:40:01.093568Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO:     -->   (usb)  RQCT903PD5B                     device  SM_G781B
+2026-07-30T00:40:01.361459Z  INFO camlink_lib::stream_manager: backend stdout stdout=/home/luiz/.local/share/scrcpy/scrcpy-server: 1 file pushed, 0 skipped. 409.7 MB/s (739850 bytes in 0.002s)
+2026-07-30T00:40:01.681566Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Device: [samsung] samsung SM-G781B (Android 13)
+2026-07-30T00:40:01.729124Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: CamLink control server listening on localabstract:camlink
+2026-07-30T00:40:01.752884Z  INFO camlink_lib::camera_controller: servidor de controle conectado protocol=1 server="camlink-v4.0"
+2026-07-30T00:40:01.753100Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: CamLink control client connected
+2026-07-30T00:40:01.804289Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Using camera '0'
+2026-07-30T00:40:02.051267Z  WARN camlink_lib::stream_manager: backend stderr stderr=ERROR: Demuxer error
+2026-07-30T00:40:02.054427Z  WARN camlink_lib::stream_manager: backend stderr stderr=Terminated
+2026-07-30T00:40:02.058622Z  INFO camlink_lib::stream_manager: backend stdout stdout=scrcpy 4.0 <https://github.com/Genymobile/scrcpy>
+2026-07-30T00:40:02.058657Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO: ADB device found:
+2026-07-30T00:40:02.058704Z  INFO camlink_lib::stream_manager: backend stdout stdout=INFO:     -->   (usb)  RQCT903PD5B                     device  SM_G781B
+2026-07-30T00:40:02.289587Z  INFO camlink_lib::stream_manager: backend stdout stdout=/home/luiz/.local/share/scrcpy/scrcpy-server: 1 file pushed, 0 skipped. 321.2 MB/s (739850 bytes in 0.002s)
+2026-07-30T00:40:02.578279Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Device: [samsung] samsung SM-G781B (Android 13)
+2026-07-30T00:40:02.627945Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: CamLink control server listening on localabstract:camlink
+2026-07-30T00:40:02.662633Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Using camera '0'
+2026-07-30T00:40:02.976908Z  INFO camlink_lib::virtualcam::v4l2: sessão encerrada; device v4l2 mantido para reuso path=/dev/video6
+2026-07-30T00:40:03.274369Z  INFO camlink_lib::stream_manager: backend stdout stdout=/home/luiz/.local/share/scrcpy/scrcpy-server: 1 file pushed, 0 skipped. 309.1 MB/s (739850 bytes in 0.002s)
+2026-07-30T00:40:03.572031Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Device: [samsung] samsung SM-G781B (Android 13)
+2026-07-30T00:40:03.622456Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: CamLink control server listening on localabstract:camlink
+2026-07-30T00:40:03.660843Z  INFO camlink_lib::stream_manager: backend stdout stdout=[server] INFO: Using camera '0'
+2026-07-30T00:40:04.622665Z  INFO camlink_lib::stream_manager: preview capturando snapshots device=/dev/video6
+```
