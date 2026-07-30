@@ -152,6 +152,60 @@ struct SessionCtx {
     orientation: Arc<StdMutex<(Rotation, bool)>>,
     control_state: ControlState,
     control: Option<ControlClient>,
+    /// Porta local do `adb forward tcp:<porta> localabstract:camlink`
+    /// corrente (achado em bancada 2026-07-30: sem rastrear isso pra dar
+    /// `adb forward --remove` depois, cada reconexão de controle deixava
+    /// mais uma entrada órfã — 15 acumuladas num único aparelho de teste).
+    forward_port: Option<u16>,
+}
+
+/// Remove o `adb forward` de uma sessão de controle encerrada. Best-effort:
+/// erro aqui (device desconectado, etc.) não deve impedir o resto do
+/// teardown.
+async fn release_control_forward(ctx: &mut SessionCtx) {
+    if let Some(port) = ctx.forward_port.take() {
+        let paths = resolve_external_paths();
+        let _ = procutil::hide_console(tokio::process::Command::new(&paths.adb))
+            .args([
+                "-s",
+                &ctx.serial,
+                "forward",
+                "--remove",
+                &format!("tcp:{port}"),
+            ])
+            .output()
+            .await;
+    }
+    ctx.control = None;
+}
+
+/// Limpa `adb forward` órfãos de sessões anteriores (achado em bancada
+/// 2026-07-30: 15 entradas `localabstract:camlink` acumuladas num aparelho —
+/// nunca eram removidas). Best-effort, roda uma vez na inicialização do app,
+/// mesmo padrão do `cleanup_stale()` do v4l2.
+async fn cleanup_stale_forwards() {
+    let paths = resolve_external_paths();
+    let Ok(output) = tokio::process::Command::new(&paths.adb)
+        .args(["forward", "--list"])
+        .output()
+        .await
+    else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(serial), Some(local), Some(remote)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        if remote == "localabstract:camlink" {
+            let _ = procutil::hide_console(tokio::process::Command::new(&paths.adb))
+                .args(["-s", serial, "forward", "--remove", local])
+                .output()
+                .await;
+        }
+    }
 }
 
 /// Sessão RTSP ativa (US4).
@@ -437,6 +491,7 @@ async fn start_stream(
                     orientation,
                     control_state: ControlState::default(),
                     control: None,
+                    forward_port: None,
                 },
             );
             Ok(response)
@@ -455,7 +510,8 @@ async fn start_stream(
 #[tauri::command]
 async fn stop_stream(state: State<'_, AppState>, session_id: Uuid) -> Result<(), AppError> {
     state.stream_manager.stop(session_id).await?;
-    if let Some(ctx) = state.sessions.lock().await.remove(&session_id) {
+    if let Some(mut ctx) = state.sessions.lock().await.remove(&session_id) {
+        release_control_forward(&mut ctx).await;
         if let Ok(mut vcam) = state.vcam.lock() {
             let _ = vcam.destroy(&ctx.vcam_id);
         }
@@ -543,32 +599,45 @@ async fn ensure_control(
     if ctx.control.is_some() {
         return Ok(());
     }
-    let paths = resolve_external_paths();
-    let mut args = camera_controller::adb_forward_args(&ctx.serial, 0);
-    // adb imprime a porta alocada no stdout quando pedimos tcp:0.
-    args[3] = "tcp:0".to_string();
-    let output = procutil::hide_console(tokio::process::Command::new(&paths.adb))
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| AppError::new("adb_forward_failed", format!("Falha no adb forward: {e}")))?;
-    if !output.status.success() {
-        return Err(AppError::new(
-            "adb_forward_failed",
-            format!(
-                "adb forward falhou: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        )
-        .with_hint("Verifique se o dispositivo continua conectado (adb devices)."));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let port = stream_manager::parse_forward_port(&stdout).ok_or_else(|| {
-        AppError::new(
-            "adb_forward_failed",
-            format!("adb forward não devolveu porta: {stdout:?}"),
-        )
-    })?;
+    // Reaproveita o forward já alocado (ex.: retry de handshake após
+    // `connect_control_with_retry` falhar) em vez de criar outro — criar
+    // sempre um novo aqui é o que gerava as entradas órfãs (achado em
+    // bancada 2026-07-30, ver `release_control_forward`).
+    let port = match ctx.forward_port {
+        Some(port) => port,
+        None => {
+            let paths = resolve_external_paths();
+            let mut args = camera_controller::adb_forward_args(&ctx.serial, 0);
+            // adb imprime a porta alocada no stdout quando pedimos tcp:0.
+            args[3] = "tcp:0".to_string();
+            let output = procutil::hide_console(tokio::process::Command::new(&paths.adb))
+                .args(&args)
+                .output()
+                .await
+                .map_err(|e| {
+                    AppError::new("adb_forward_failed", format!("Falha no adb forward: {e}"))
+                })?;
+            if !output.status.success() {
+                return Err(AppError::new(
+                    "adb_forward_failed",
+                    format!(
+                        "adb forward falhou: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                )
+                .with_hint("Verifique se o dispositivo continua conectado (adb devices)."));
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let port = stream_manager::parse_forward_port(&stdout).ok_or_else(|| {
+                AppError::new(
+                    "adb_forward_failed",
+                    format!("adb forward não devolveu porta: {stdout:?}"),
+                )
+            })?;
+            ctx.forward_port = Some(port);
+            port
+        }
+    };
 
     let (client, mut events) = connect_control_with_retry(port).await.map_err(|e| {
         AppError::new("control_connect_failed", e.to_string()).with_hint(
@@ -661,9 +730,19 @@ async fn get_capabilities(
         })?;
     ensure_control(&app, *session_id, ctx).await?;
     let client = ctx.control.as_mut().expect("ensure_control garantiu");
-    let reply = get_capabilities_with_retry(client)
-        .await
-        .map_err(|e| AppError::new("control_request_failed", e.to_string()))?;
+    let reply = get_capabilities_with_retry(client).await;
+    let reply = match reply {
+        Ok(reply) => reply,
+        Err(err) => {
+            // Mesma invalidação de `set_control`: sem isso, uma conexão
+            // morta (ex.: subprocess reiniciou) fica presa em `ctx.control`
+            // pra sempre — toda chamada seguinte repete o mesmo erro
+            // ("conexão de controle encerrada pelo servidor") até fechar e
+            // reabrir o app (achado em bancada 2026-07-30, Samsung S20 FE).
+            release_control_forward(ctx).await;
+            return Err(AppError::new("control_request_failed", err.to_string()));
+        }
+    };
     let data = reply_to_result(reply)?;
     serde_json::from_value(data).map_err(|e| {
         AppError::new(
@@ -724,7 +803,7 @@ async fn set_control(
     let reply = match reply {
         Ok(reply) => reply,
         Err(err) => {
-            ctx.control = None;
+            release_control_forward(ctx).await;
             return Err(err);
         }
     };
@@ -941,7 +1020,9 @@ async fn restart_android_session(
     let _restart_guard = lock.lock().await;
 
     state.stream_manager.stop(old_session_id).await?;
-    state.sessions.lock().await.remove(&old_session_id);
+    if let Some(mut old_ctx) = state.sessions.lock().await.remove(&old_session_id) {
+        release_control_forward(&mut old_ctx).await;
+    }
 
     let orientation = *orientation_cell.lock().unwrap();
     let output_dims = if orientation.0.swaps_dimensions() {
@@ -992,6 +1073,7 @@ async fn restart_android_session(
             orientation: orientation_cell,
             control_state,
             control: None,
+            forward_port: None,
         },
     );
     Ok(response)
@@ -1454,6 +1536,7 @@ pub fn run() {
     let _runtime_guard = runtime.enter();
 
     let adb_path = PathBuf::from("adb");
+    runtime.spawn(cleanup_stale_forwards());
     let stream_manager = StreamManager::new(resolve_external_paths());
     let rtsp_sessions: Arc<TokioMutex<HashMap<Uuid, RtspRuntime>>> =
         Arc::new(TokioMutex::new(HashMap::new()));

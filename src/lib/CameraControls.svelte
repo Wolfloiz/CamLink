@@ -229,7 +229,7 @@
       <button
         type="button"
         disabled={busy}
-        title="Girar o vídeo entregue em passos de 90° — girar 90°/270° reinicia a sessão; se o Meet mostrar a câmera como indisponível depois, dê F5 na aba"
+        title="Girar o vídeo entregue em passos de 90° — no Linux reinicia a sessão sempre; no Windows só ao girar 90°/270°; se o Meet mostrar a câmera como indisponível depois, dê F5 na aba"
         onclick={handleRotate}
       >
         Girar ({ROTATION_LABEL[rotation]})
@@ -239,7 +239,7 @@
         type="button"
         disabled={busy}
         class:active={mirror}
-        title="Espelhar horizontalmente o vídeo entregue"
+        title="Espelhar horizontalmente o vídeo entregue — no Linux reinicia a sessão (limitação do pipeline v4l2)"
         onclick={handleMirror}
       >
         Espelhar {mirror ? "on" : "off"}
@@ -250,9 +250,10 @@
       Toque no preview para focar naquela região (tap-to-focus).
     </p>
     <p class="hint">
-      Trocar de câmera ou girar 90°/270° reinicia a sessão — se o app de
-      chamada (Meet etc.) mostrar a câmera como indisponível depois, dê F5 na
-      aba ou saia e entre de novo na chamada.
+      Trocar de câmera, espelhar ou girar reinicia a sessão no Linux (no
+      Windows só ao girar 90°/270°) — se o app de chamada (Meet etc.)
+      mostrar a câmera como indisponível depois, dê F5 na aba ou saia e
+      entre de novo na chamada.
     </p>
   {/if}
 </div>

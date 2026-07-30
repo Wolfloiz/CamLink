@@ -52,15 +52,35 @@ cargo fmt --check && cargo clippy -- -D warnings && cargo test
 
 ## Limitações conhecidas
 
-- **Trocar de câmera (frontal/traseira) ou girar 90°/270° pode exigir
-  atualizar a página no Meet/Chrome uma vez.** O scrcpy não suporta trocar de
-  câmera sem reiniciar o processo inteiro (limitação do próprio scrcpy), o
-  que gera um instante sem frame novo. O device virtual continua saudável
-  durante esse instante (confirmado: nenhum evento de add/remove/change no
-  kernel), mas o Meet às vezes marca a câmera como indisponível e não
-  recupera sozinho — nem esperando alguns segundos. **F5 na aba (ou sair e
-  entrar de novo na chamada) resolve.** Giro 0°/180° e espelhar não têm esse
-  problema (não reiniciam o processo).
+- **Trocar de câmera (frontal/traseira), espelhar ou girar (qualquer ângulo)
+  no Linux pode exigir atualizar a página no Meet/Chrome uma vez.** No
+  Linux, o scrcpy escreve os frames direto no device v4l2loopback
+  (`--v4l2-sink`) sem passar pelo CamLink — não há como aplicar espelho/giro
+  "ao vivo" nesse caminho, então **toda** mudança de orientação reinicia o
+  processo do scrcpy (não só 90°/270° como no Windows, onde o pipeline passa
+  pelo Rust e permite atualização ao vivo — FR-016a). Isso gera um instante
+  sem frame novo; o device virtual continua saudável durante esse instante
+  (confirmado: nenhum evento de add/remove/change no kernel), mas o Meet às
+  vezes marca a câmera como indisponível e não recupera sozinho — nem
+  esperando alguns segundos. **F5 na aba (ou sair e entrar de novo na
+  chamada) resolve.**
+- **Em alguns aparelhos Samsung, reconectar após um restart pode entrar num
+  ciclo de falhas/artefatos que não se autorrecupera** (visto em bancada com
+  um SM-G781B — o app tenta de novo com backoff, mas o dispositivo às vezes
+  não libera a câmera a tempo, ciclando entre "Address already in use",
+  "Demuxer error" e `CAMERA_DISCONNECTED`). Depois de várias tentativas
+  seguidas sem sucesso, o app desiste e mostra um erro pedindo pra
+  desconectar/reconectar o cabo USB ou reiniciar o app, em vez de martelar o
+  device indefinidamente (circuit breaker). **Causa raiz**: parece ser um bug
+  conhecido e ainda aberto do próprio scrcpy com o Camera2 HAL de aparelhos
+  Samsung (não é específico do CamLink) — mesmo padrão relatado em S22,
+  SM-S906B e outros: [#6514](https://github.com/Genymobile/scrcpy/issues/6514),
+  [#5977](https://github.com/Genymobile/scrcpy/issues/5977),
+  [#5311](https://github.com/Genymobile/scrcpy/issues/5311). Tentativas de
+  isolar o gatilho (resolução, sequência de restart de rotação, leitor de
+  preview concorrente) não reproduziram em testes isolados — o disparo real
+  parece exigir o padrão de uso completo do app. **Ainda sem decisão de
+  como tratar definitivamente; será decidido antes da versão release.**
 
 ## Licença
 

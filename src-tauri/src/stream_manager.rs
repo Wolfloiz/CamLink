@@ -51,6 +51,15 @@ const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(3);
 /// só faz o loop se perpetuar mais rápido.
 const HEALTHY_STREAK: Duration = Duration::from_secs(2);
 const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Circuit breaker (achado em bancada 2026-07-30, Samsung SM-G781B): sem
+/// isso, uma sessão que nunca fica de pé por `HEALTHY_STREAK` martela
+/// reconectando pra sempre (visto em hardware: 50+ segundos, várias dezenas
+/// de tentativas, ciclando entre "Address already in use", "Demuxer error",
+/// "Server connection failed" e `CAMERA_DISCONNECTED`, sem nunca se
+/// recuperar sozinho — só um restart do app inteiro parava). Passado esse
+/// número de falhas SEGUIDAS (sem nenhum `HEALTHY_STREAK` no meio), desiste
+/// e vira erro acionável em vez de continuar martelando o device.
+const MAX_CONSECUTIVE_FAILURES: u32 = 6;
 
 /// Sinal de parada compartilhado entre `stop()` e a task de monitor de uma
 /// sessão. Existe porque o child do backend passa a maior parte do tempo
@@ -1408,6 +1417,7 @@ async fn monitor_session(
     async move {
         let mut backoff = RETRY_BACKOFF;
         let mut last_recovery = tokio::time::Instant::now();
+        let mut consecutive_failures: u32 = 0;
 
         loop {
             let child = {
@@ -1453,11 +1463,22 @@ async fn monitor_session(
                         return;
                     }
 
-                    backoff = if last_recovery.elapsed() < HEALTHY_STREAK {
-                        (backoff * 2).min(MAX_RETRY_BACKOFF)
-                    } else {
+                    let healthy = last_recovery.elapsed() >= HEALTHY_STREAK;
+                    backoff = if healthy {
                         RETRY_BACKOFF
+                    } else {
+                        (backoff * 2).min(MAX_RETRY_BACKOFF)
                     };
+                    consecutive_failures = if healthy { 0 } else { consecutive_failures + 1 };
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        let mut guard = sessions.lock().await;
+                        if let Some(running) = guard.get_mut(&session_id) {
+                            let _ = running.session.apply(SessionEvent::Fail(format!(
+                                "Câmera não estabilizou após {MAX_CONSECUTIVE_FAILURES} tentativas de reconexão seguidas — desconecte e reconecte o cabo USB, ou reinicie o app."
+                            )));
+                        }
+                        return;
+                    }
                     // backoff pode chegar a MAX_RETRY_BACKOFF (3s); um
                     // sleep() simples aqui deixava stop() esperando o sleep
                     // inteiro terminar antes de sequer checar o pedido de
