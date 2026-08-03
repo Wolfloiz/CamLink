@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_mode", "mode": "night" },
+  "response": { "ok": true, "data": { "mode": "night" } }
+}

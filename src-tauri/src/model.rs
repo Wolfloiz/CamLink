@@ -335,6 +335,36 @@ pub struct ControlState {
     pub mirror: bool,
 }
 
+impl ControlState {
+    /// Aplica ao `ControlState` local os únicos 2 campos que a tabela de
+    /// modos (research.md R2 / control-protocol.md §3) sobrescreve e que têm
+    /// representação dedicada aqui (`eis`, `exposure_comp`) — o resto da
+    /// tabela (AF/AE/FPS/AWB/NR) não tem campo próprio na UI
+    /// (data-model.md). `pro` deixa `exposure_comp` livre (não fixado pela
+    /// tabela) mas AINDA fixa `eis=false` (`VIDEO_STABILIZATION_MODE_OFF` não
+    /// é "livre" pra pro, só fps/EV/AWB são).
+    pub fn apply_smart_mode(&mut self, mode: SmartMode) {
+        match mode {
+            SmartMode::Auto => {
+                self.eis = true;
+                self.exposure_comp = 0;
+            }
+            SmartMode::Night => {
+                self.eis = true;
+                self.exposure_comp = 1;
+            }
+            SmartMode::Sport => {
+                self.eis = false;
+                self.exposure_comp = 0;
+            }
+            SmartMode::Pro => {
+                self.eis = false;
+            }
+        }
+        self.mode = mode;
+    }
+}
+
 impl Default for ControlState {
     fn default() -> Self {
         Self {

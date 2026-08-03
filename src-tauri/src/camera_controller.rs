@@ -15,7 +15,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-use crate::model::{FocusMode, WbMode};
+use crate::model::{FocusMode, SmartMode, WbMode};
 
 /// Versão de protocolo que este cliente entende (contrato: Versionamento).
 pub const SUPPORTED_PROTOCOL: u32 = 1;
@@ -29,6 +29,7 @@ pub const SUPPORTED_PROTOCOL: u32 = 1;
 pub enum ControlRequest {
     Hello,
     GetCapabilities,
+    SetMode { mode: SmartMode },
     SetZoom { ratio: f32 },
     SetFocus { focus: FocusMode },
     SetExposure { compensation: i32 },
@@ -44,6 +45,9 @@ pub enum ControlRequest {
 enum WireRequest {
     Hello,
     GetCapabilities,
+    SetMode {
+        mode: SmartMode,
+    },
     SetZoom {
         ratio: f32,
     },
@@ -78,6 +82,7 @@ impl ControlRequest {
         match self {
             ControlRequest::Hello => WireRequest::Hello,
             ControlRequest::GetCapabilities => WireRequest::GetCapabilities,
+            ControlRequest::SetMode { mode } => WireRequest::SetMode { mode: *mode },
             ControlRequest::SetZoom { ratio } => WireRequest::SetZoom { ratio: *ratio },
             ControlRequest::SetFocus { focus } => match focus {
                 FocusMode::ContinuousAuto => WireRequest::SetFocus {

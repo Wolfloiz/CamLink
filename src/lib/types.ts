@@ -125,6 +125,7 @@ export interface ControlState {
 
 /** Enum serde externally-tagged de `ControlChange` (lib.rs). */
 export type ControlChange =
+  | { mode: SmartMode }
   | { zoom: number }
   | { focus: FocusMode }
   | { exposure_comp: number }

@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_mode", "mode": "sport" },
+  "response": { "ok": true, "data": { "mode": "sport" } }
+}

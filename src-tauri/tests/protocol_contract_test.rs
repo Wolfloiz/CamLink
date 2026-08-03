@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use camlink_lib::camera_controller::{
     ControlErrorCode, ControlReply, ControlRequest, ServerMessage,
 };
-use camlink_lib::model::{DeviceCapabilities, FocusMode, WbMode};
+use camlink_lib::model::{DeviceCapabilities, FocusMode, SmartMode, WbMode};
 use serde_json::Value;
 
 fn golden_dir() -> PathBuf {
@@ -36,6 +36,14 @@ fn typed_request(req: &Value) -> Option<ControlRequest> {
     let typed = match cmd {
         "hello" => ControlRequest::Hello,
         "get_capabilities" => ControlRequest::GetCapabilities,
+        "set_mode" => {
+            // .ok()? em vez de .expect(...): cobre set_mode_bad_mode.json
+            // (valor que não bate com nenhuma variante de SmartMode) e
+            // set_mode_missing_field.json (campo ausente) — mesmo padrão de
+            // set_focus_bad_mode.json acima.
+            let mode: SmartMode = serde_json::from_value(req["mode"].clone()).ok()?;
+            ControlRequest::SetMode { mode }
+        }
         "set_zoom" => ControlRequest::SetZoom {
             ratio: req.get("ratio")?.as_f64()? as f32,
         },

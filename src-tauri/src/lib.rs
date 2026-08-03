@@ -39,7 +39,8 @@ use device_manager::DeviceEvent;
 use error::AppError;
 use model::{
     AndroidDevice, ControlState, DeviceCapabilities, FocusMode, ManualExposure, Rotation,
-    RtspSource, RtspState, SessionSource, SessionState, SessionStats, StreamConfig, WbMode,
+    RtspSource, RtspState, SessionSource, SessionState, SessionStats, SmartMode, StreamConfig,
+    WbMode,
 };
 use stream_manager::{ExternalPaths, FrameSink, StreamManager};
 use virtualcam::VirtualCameraBackend;
@@ -527,6 +528,7 @@ async fn stop_stream(state: State<'_, AppState>, session_id: Uuid) -> Result<(),
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ControlChange {
+    Mode(SmartMode),
     Zoom(f32),
     Focus(FocusMode),
     ExposureComp(i32),
@@ -785,6 +787,7 @@ async fn set_control(
     ensure_control(&app, session_id, ctx).await?;
 
     let request = match &change {
+        ControlChange::Mode(mode) => ControlRequest::SetMode { mode: *mode },
         ControlChange::Zoom(ratio) => ControlRequest::SetZoom { ratio: *ratio },
         ControlChange::Focus(focus) => ControlRequest::SetFocus { focus: *focus },
         ControlChange::ExposureComp(ev) => ControlRequest::SetExposure { compensation: *ev },
@@ -810,6 +813,7 @@ async fn set_control(
     reply_to_result(reply)?;
 
     match change {
+        ControlChange::Mode(mode) => ctx.control_state.apply_smart_mode(mode),
         ControlChange::Zoom(ratio) => ctx.control_state.zoom_ratio = ratio,
         ControlChange::Focus(focus) => ctx.control_state.focus = focus,
         ControlChange::ExposureComp(ev) => ctx.control_state.exposure_comp = ev,

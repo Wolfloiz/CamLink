@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "set_mode", "mode": "cinematic" },
+  "response": { "ok": false, "error": { "code": "BAD_REQUEST", "msg": "modo inválido: cinematic" } }
+}

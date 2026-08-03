@@ -147,15 +147,15 @@ do fork, Java), `installer/{linux,windows}/`.
 
 ### Tests for User Story 3 (REQUIRED) ⚠️
 
-- [ ] T042 [P] [US3] Golden files de `set_mode` (4 modos + transições + Pro liberando manuais) e teste JUnit da tabela `ModePresets` (parâmetros Camera2 exatos da tabela do contrato) em `scrcpy/server/src/test/java/.../ModePresetsTest.java`
-- [ ] T043 [P] [US3] Teste Rust: `set_mode` sobrescreve `ControlState` conforme tabela (research R2) em `src-tauri/tests/mode_state_test.rs`
+- [x] T042 [P] [US3] Golden files de `set_mode` (4 modos + transições + Pro liberando manuais) e teste JUnit da tabela `ModePresets` (parâmetros Camera2 exatos da tabela do contrato) em `scrcpy/server/src/test/java/.../ModePresetsTest.java`
+- [x] T043 [P] [US3] Teste Rust: `set_mode` sobrescreve `ControlState` conforme tabela (research R2) em `src-tauri/tests/mode_state_test.rs`
 
 ### Implementation for User Story 3
 
-- [ ] T044 [US3] Fork: `ModePresets.java` (tabela AF/AE/FPS/EV/AWB/EIS/NR por modo, sem SCENE_MODE) + `set_mode` + face-AF automático (`STATISTICS_FACE_DETECT_MODE_SIMPLE` → `AF_REGIONS` em auto/night) + eventos `faces`
-- [ ] T045 [US3] Comando Tauri `set_mode` + sincronização de `ControlState` na UI em `src-tauri/src/lib.rs`
-- [ ] T046 [P] [US3] Frontend: `src/lib/ModeSelector.svelte` (4 modos, indicador ativo, Pro habilita campos manuais)
-- [ ] T047 [US3] Validação manual: quickstart Cenário 3 (Sport 60 fps, Night +1EV/15–30 fps, Pro manual completo)
+- [x] T044 [US3] Fork: `ModePresets.java` (tabela AF/AE/FPS/EV/AWB/EIS/NR por modo, sem SCENE_MODE) + `set_mode` + face-AF automático (`STATISTICS_FACE_DETECT_MODE_SIMPLE` → `AF_REGIONS` em auto/night) + eventos `faces`
+- [x] T045 [US3] Comando Tauri `set_mode` + sincronização de `ControlState` na UI em `src-tauri/src/lib.rs`
+- [x] T046 [P] [US3] Frontend: `src/lib/ModeSelector.svelte` (4 modos, indicador ativo, Pro habilita campos manuais)
+- [x] T047 [US3] Validação manual: quickstart Cenário 3 (Sport 60 fps, Night +1EV/15–30 fps, Pro manual completo) — validado em hardware (SM-G781B): troca de modo não derruba o stream (SC-004), Night mais claro com fps 15–30, Pro libera ISO manual na UI. Sport medido em 30 fps estável (via `ffmpeg -f v4l2 -i /dev/videoX -f null -`) — confirmado via `dumpsys media.camera` que o aparelho não declara nenhum range de AE com 60 fps (só até `[30,30]`), então 30 fps é o teto real do hardware, coberto pela cláusula "quando o aparelho suporta" (spec.md:141). UI (`ModeSelector.svelte`) agora mostra a fps real ao lado do modo quando diverge do ideal, em vez de falhar silenciosamente (spec.md:239).
 
 **Checkpoint**: US1–US3 independentes e funcionais
 

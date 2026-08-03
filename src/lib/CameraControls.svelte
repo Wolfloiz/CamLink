@@ -6,9 +6,9 @@
   import { getCapabilities, setControl, switchCamera } from "./api";
   import type {
     ControlChange,
-    ControlState,
     DeviceCapabilities,
     Rotation,
+    SmartMode,
     StartStreamResponse,
     WbMode,
   } from "./types";
@@ -16,11 +16,14 @@
   let {
     sessionId,
     serial,
+    mode,
     onSessionChanged,
     onError,
   }: {
     sessionId: string;
     serial: string;
+    /** Modo inteligente corrente (US3) — libera ISO manual só em "pro". */
+    mode: SmartMode;
     /** switch_camera / girar 90°-270° reiniciam a sessão → novo session_id. */
     onSessionChanged: (response: StartStreamResponse) => void;
     onError: (e: unknown) => void;
@@ -52,6 +55,15 @@
   let torch = $state(false);
   let rotation = $state<Rotation>("deg0");
   let mirror = $state(false);
+  let iso = $state(0);
+
+  $effect(() => {
+    // ISO manual só existe fora do modo pro se o usuário nunca tocou nele;
+    // ao entrar em pro, alinha o slider ao piso do range do aparelho.
+    if (mode === "pro" && caps?.iso_range) {
+      iso = caps.iso_range[0];
+    }
+  });
 
   $effect(() => {
     // Recarrega quando a sessão muda (switch/rotate criam sessão nova).
@@ -175,12 +187,22 @@
         class:unsupported={caps.iso_range === null}
         title={caps.iso_range === null
           ? "Este aparelho não expõe ISO manual"
-          : "ISO manual exige o modo Pro (chega com os modos inteligentes)"}
+          : mode === "pro"
+            ? "ISO manual"
+            : "ISO manual exige o modo Pro"}
       >
         ISO {caps.iso_range
           ? `(${caps.iso_range[0]}–${caps.iso_range[1]})`
           : "(não suportado)"}
-        <input type="number" disabled value={caps.iso_range?.[0] ?? 0} />
+        <input
+          type="number"
+          min={caps.iso_range?.[0] ?? 0}
+          max={caps.iso_range?.[1] ?? 0}
+          step="1"
+          disabled={busy || caps.iso_range === null || mode !== "pro"}
+          bind:value={iso}
+          onchange={() => apply({ iso })}
+        />
       </label>
     </div>
 

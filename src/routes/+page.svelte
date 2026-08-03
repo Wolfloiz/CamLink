@@ -2,9 +2,11 @@
   import { onDestroy } from "svelte";
   import CameraControls from "$lib/CameraControls.svelte";
   import DeviceList from "$lib/DeviceList.svelte";
+  import ModeSelector from "$lib/ModeSelector.svelte";
   import Preview from "$lib/Preview.svelte";
   import RtspPanel from "$lib/RtspPanel.svelte";
   import {
+    onControlState,
     onSessionReplaced,
     onSessionState,
     setControl,
@@ -16,6 +18,7 @@
     isSessionActive,
     isSessionError,
     type AndroidDevice,
+    type ControlState,
     type SessionState,
     type SessionStats,
     type StartStreamResponse,
@@ -40,6 +43,7 @@
   let sessionId = $state<string | null>(null);
   let sessionState = $state<SessionState | null>(null);
   let sessionStats = $state<SessionStats | null>(null);
+  let controlState = $state<ControlState | null>(null);
   let starting = $state(false);
   let stopping = $state(false);
   let errorMsg = $state<string | null>(null);
@@ -52,6 +56,7 @@
 
   let unlistenSessionState: (() => void) | null = null;
   let unlistenSessionReplaced: (() => void) | null = null;
+  let unlistenControlState: (() => void) | null = null;
 
   $effect(() => {
     onSessionState((event) => {
@@ -74,23 +79,35 @@
     }).then((fn) => {
       unlistenSessionReplaced = fn;
     });
+    // US3: modo inteligente corrente — CameraControls usa pra liberar ISO
+    // manual só no modo pro; ModeSelector usa pra marcar o modo ativo.
+    onControlState((event) => {
+      if (event.session_id !== sessionId) return;
+      controlState = event.control_state;
+    }).then((fn) => {
+      unlistenControlState = fn;
+    });
     return () => {
       unlistenSessionState?.();
       unlistenSessionState = null;
       unlistenSessionReplaced?.();
       unlistenSessionReplaced = null;
+      unlistenControlState?.();
+      unlistenControlState = null;
     };
   });
 
   onDestroy(() => {
     unlistenSessionState?.();
     unlistenSessionReplaced?.();
+    unlistenControlState?.();
   });
 
   function adoptSession(response: StartStreamResponse) {
     sessionId = response.session_id;
     sessionState = response.state;
     sessionStats = response.stats;
+    controlState = null; // sessão nova: modo corrente ainda não é conhecido
   }
 
   async function handleTapToFocus(x: number, y: number) {
@@ -248,10 +265,21 @@
 
   {#if active && sessionId && selectedDevice}
     <section>
+      <h2>Modo</h2>
+      <ModeSelector
+        {sessionId}
+        serial={selectedDevice.serial}
+        mode={controlState?.mode ?? "auto"}
+        onError={applyError}
+      />
+    </section>
+
+    <section>
       <h2>Controles da câmera</h2>
       <CameraControls
         {sessionId}
         serial={selectedDevice.serial}
+        mode={controlState?.mode ?? "auto"}
         onSessionChanged={adoptSession}
         onError={applyError}
       />

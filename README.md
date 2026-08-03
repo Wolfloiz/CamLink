@@ -14,6 +14,10 @@ Firefox — WebRTC), Discord e qualquer aplicativo que use câmera.
   USB/ADB; nenhum aplicativo é instalado no aparelho (Android 12+).
 - **Controles de câmera em tempo real**: zoom, foco (tap-to-focus), exposição,
   balanço de branco, torch e estabilização, direto do desktop.
+- **Modos inteligentes**: Auto, Night, Sport e Pro trocam parâmetros de
+  câmera (foco, exposição, fps, estabilização, redução de ruído, AF por
+  rosto) em runtime, sem interromper o stream; Pro libera controle manual
+  completo.
 - **Fontes IP/RTSP**: câmeras de rede como webcams virtuais, com credenciais
   guardadas apenas no cofre de segredos do sistema operacional.
 - **Múltiplos dispositivos simultâneos**: cada fonte vira um dispositivo de
