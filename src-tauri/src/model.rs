@@ -432,4 +432,10 @@ pub struct AppConfig {
     pub raw_output_dir: Option<PathBuf>,
     /// Serials com auto-start ao reconectar.
     pub auto_connect: Vec<String>,
+    /// Apelido definido pelo usuário, por serial (T065e) — o `model` do adb
+    /// costuma ser só o nome de código comercial ("SM-S921B"), não o nome
+    /// de marketing ("Galaxy S24"); sem esse mapeamento no app, deixar o
+    /// usuário nomear é o caminho. Chave ausente = sem apelido (cai pro
+    /// modelo, ver `virtualcam::android_label_discriminator`).
+    pub device_nicknames: HashMap<String, String>,
 }

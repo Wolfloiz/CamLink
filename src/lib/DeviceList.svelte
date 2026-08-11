@@ -11,10 +11,40 @@
   let {
     selectedSerial = null,
     onSelect,
+    nicknames = {},
+    onRename,
   }: {
     selectedSerial?: string | null;
     onSelect?: (device: AndroidDevice) => void;
+    /** T065e: apelido por serial — sobrescreve `device.model` na exibição. */
+    nicknames?: Record<string, string>;
+    onRename?: (serial: string, name: string) => void;
   } = $props();
+
+  // T065e: editar o apelido ANTES de iniciar a fonte é o caminho sem
+  // restart — uma vez que o device virtual existe, o v4l2loopback não tem
+  // como renomeá-lo (só add/delete), então um rename ao vivo só reflete no
+  // OBS na próxima vez que a fonte for reiniciada.
+  let renamingSerial = $state<string | null>(null);
+  let draftName = $state("");
+
+  function startRename(serial: string, currentName: string, event: MouseEvent) {
+    event.stopPropagation();
+    draftName = currentName;
+    renamingSerial = serial;
+  }
+
+  function commitRename(serial: string, event?: Event) {
+    event?.stopPropagation();
+    renamingSerial = null;
+    const trimmed = draftName.trim();
+    onRename?.(serial, trimmed);
+  }
+
+  function cancelRename(event: Event) {
+    event.stopPropagation();
+    renamingSerial = null;
+  }
 
   let devices = $state<AndroidDevice[]>([]);
   let loadError = $state<string | null>(null);
@@ -94,13 +124,39 @@
         class:disabled={device.auth_state !== "authorized" ||
           !device.compatible}
       >
-        <button
-          type="button"
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <div
           class="device-row"
+          class:device-row-disabled={device.auth_state !== "authorized" || !device.compatible}
           onclick={() => select(device)}
-          disabled={device.auth_state !== "authorized" || !device.compatible}
+          role="button"
+          tabindex="0"
         >
-          <span class="model">{device.model}</span>
+          {#if renamingSerial === device.serial}
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              class="name-input"
+              type="text"
+              bind:value={draftName}
+              autofocus
+              onclick={(e) => e.stopPropagation()}
+              onkeydown={(e) => {
+                if (e.key === "Enter") commitRename(device.serial, e);
+                if (e.key === "Escape") cancelRename(e);
+              }}
+              onblur={() => commitRename(device.serial)}
+            />
+          {:else}
+            <span class="model">{nicknames[device.serial] || device.model}</span>
+            <button
+              type="button"
+              class="rename-btn"
+              title="Renomear"
+              onclick={(e) => startRename(device.serial, nicknames[device.serial] ?? "", e)}
+            >
+              ✎
+            </button>
+          {/if}
           <span class="serial">{device.serial}</span>
           {#if !device.compatible}
             <span class="badge badge-incompatible"><span class="dot"></span>Incompatível</span>
@@ -116,7 +172,7 @@
               {/if}
             </span>
           {/if}
-        </button>
+        </div>
 
         {#if device.auth_state === "unauthorized"}
           <div class="guide">
@@ -184,13 +240,46 @@
     color: inherit;
   }
 
-  .device-row:disabled {
+  .device-row-disabled {
     cursor: not-allowed;
   }
 
   .model {
     font-weight: 600;
     flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .rename-btn {
+    border: none;
+    background: transparent;
+    color: inherit;
+    opacity: 0.6;
+    cursor: pointer;
+    font-size: 0.85em;
+    padding: 0 0.15rem;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  .rename-btn:hover {
+    opacity: 1;
+    color: #6d5cf5;
+  }
+
+  .name-input {
+    flex: 1;
+    min-width: 0;
+    font-weight: 600;
+    font-family: inherit;
+    font-size: 1em;
+    background: var(--card-bg, #fff);
+    color: inherit;
+    border: 1px solid #6d5cf5;
+    border-radius: 6px;
+    padding: 0.1rem 0.4rem;
   }
 
   .serial {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import CameraControls from "$lib/CameraControls.svelte";
   import DeviceList from "$lib/DeviceList.svelte";
   import ModeSelector from "$lib/ModeSelector.svelte";
@@ -8,10 +8,12 @@
   import RtspPanel from "$lib/RtspPanel.svelte";
   import SourceGrid from "$lib/SourceGrid.svelte";
   import {
+    listDeviceNicknames,
     onControlState,
     onSessionReplaced,
     onSessionState,
     setControl,
+    setDeviceNickname,
     startStream,
     stopRtsp,
     stopStream,
@@ -47,6 +49,32 @@
   // (controles completos), igual ao design aprovado no Penpot.
   let sources = $state<ActiveSource[]>([]);
   let expandedId = $state<string | null>(null);
+  // T065e: apelidos persistidos por serial ("Câmera lateral" em vez do
+  // model bruto do adb) — carregado uma vez; atualizado localmente junto
+  // com a chamada que persiste, sem precisar recarregar tudo.
+  let deviceNicknames = $state<Record<string, string>>({});
+  onMount(() => {
+    listDeviceNicknames()
+      .then((n) => (deviceNicknames = n))
+      .catch(() => {});
+  });
+
+  async function handleRenameDevice(serial: string, nickname: string) {
+    const trimmed = nickname.trim();
+    try {
+      await setDeviceNickname(serial, trimmed);
+    } catch (e) {
+      applyError(e);
+      return;
+    }
+    deviceNicknames = { ...deviceNicknames, [serial]: trimmed };
+    if (!trimmed) delete deviceNicknames[serial];
+    sources = sources.map((s) =>
+      s.kind === "android" && s.serial === serial
+        ? { ...s, name: trimmed || s.name }
+        : s,
+    );
+  }
   const expandedSource = $derived(
     sources.find((s) => s.id === expandedId) ?? null,
   );
@@ -213,7 +241,7 @@
         kind: "android",
         id: response.session_id,
         sessionId: response.session_id,
-        name: selectedDevice.model,
+        name: deviceNicknames[selectedDevice.serial] || selectedDevice.model,
         meta: `adb · USB · ${selectedDevice.serial}`,
         state: response.state,
         stats: response.stats,
@@ -297,6 +325,8 @@
           <DeviceList
             selectedSerial={selectedDevice?.serial ?? null}
             onSelect={(device) => (selectedDevice = device)}
+            nicknames={deviceNicknames}
+            onRename={handleRenameDevice}
           />
         </div>
 
@@ -383,7 +413,13 @@
             RTSP na barra lateral e inicie a transmissão.
           </p>
         {/if}
-        <SourceGrid {sources} {expandedId} onSelect={(id) => (expandedId = id)} onStop={handleStopSource} />
+        <SourceGrid
+          {sources}
+          {expandedId}
+          onSelect={(id) => (expandedId = id)}
+          onStop={handleStopSource}
+          onRename={(source, name) => handleRenameDevice(source.serial!, name)}
+        />
       </div>
 
       {#if expandedSource}

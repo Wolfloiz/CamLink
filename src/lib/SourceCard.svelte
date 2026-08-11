@@ -10,14 +10,22 @@
     expanded,
     onExpand,
     onStop,
+    onRename,
   }: {
     source: ActiveSource;
     expanded: boolean;
     onExpand: () => void;
     onStop: () => void;
+    onRename?: (name: string) => void;
   } = $props();
 
   let stopping = $state(false);
+  // T065e: apelido editável direto no card (só fontes Android — RTSP já
+  // tem nome próprio definido no cadastro da fonte).
+  let renaming = $state(false);
+  // Preenchido em `startRename` (não aqui) — `source.name` muda ao vivo via
+  // eventos de sessão, e capturar o valor aqui só pegaria o inicial.
+  let draftName = $state("");
 
   async function handleStop(event: MouseEvent) {
     event.stopPropagation();
@@ -27,6 +35,26 @@
     } finally {
       stopping = false;
     }
+  }
+
+  function startRename(event: MouseEvent) {
+    event.stopPropagation();
+    draftName = source.name;
+    renaming = true;
+  }
+
+  function commitRename(event?: Event) {
+    event?.stopPropagation();
+    renaming = false;
+    const trimmed = draftName.trim();
+    if (trimmed && trimmed !== source.name) {
+      onRename?.(trimmed);
+    }
+  }
+
+  function cancelRename(event: Event) {
+    event.stopPropagation();
+    renaming = false;
   }
 
   const statusLabel = $derived(
@@ -66,7 +94,33 @@
   </div>
 
   <div class="name-row">
-    <span class="name">{source.name}</span>
+    {#if renaming}
+      <!-- svelte-ignore a11y_autofocus -->
+      <input
+        class="name-input"
+        type="text"
+        bind:value={draftName}
+        autofocus
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => {
+          if (e.key === "Enter") commitRename(e);
+          if (e.key === "Escape") cancelRename(e);
+        }}
+        onblur={commitRename}
+      />
+    {:else}
+      <span class="name">{source.name}</span>
+      {#if onRename}
+        <button
+          type="button"
+          class="rename-btn"
+          title="Renomear"
+          onclick={startRename}
+        >
+          ✎
+        </button>
+      {/if}
+    {/if}
     <span class="fps">{source.stats ? `${source.stats.fps.toFixed(1)} fps` : "—"}</span>
   </div>
   <span class="meta">{source.meta}</span>
@@ -166,6 +220,34 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .rename-btn {
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.85em;
+    padding: 0 0.15rem;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  .rename-btn:hover {
+    color: var(--accent);
+  }
+
+  .name-input {
+    flex: 1;
+    min-width: 0;
+    font-weight: 600;
+    font-size: 0.9em;
+    font-family: inherit;
+    background: var(--card-bg);
+    color: inherit;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 0.1rem 0.4rem;
   }
 
   .fps {

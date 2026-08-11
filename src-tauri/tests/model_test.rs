@@ -285,6 +285,10 @@ fn app_config_roundtrip() {
         last_stream_config,
         raw_output_dir: Some(PathBuf::from("/home/user/Imagens/CamLink")),
         auto_connect: vec!["R58M12ABCDE".into()],
+        device_nicknames: HashMap::from([(
+            "R58M12ABCDE".to_string(),
+            "Câmera lateral".to_string(),
+        )]),
     };
     assert_eq!(roundtrip(&config), config);
 }

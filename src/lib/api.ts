@@ -34,6 +34,20 @@ export function stopStream(sessionId: string): Promise<void> {
   return invoke("stop_stream", { sessionId });
 }
 
+// --- T065e: apelido de dispositivo Android (o "model" do adb costuma ser só
+// o nome de código comercial, ex. "SM-S921B", não "Galaxy S24") ---
+
+export function setDeviceNickname(
+  serial: string,
+  nickname: string,
+): Promise<void> {
+  return invoke("set_device_nickname", { serial, nickname });
+}
+
+export function listDeviceNicknames(): Promise<Record<string, string>> {
+  return invoke("list_device_nicknames");
+}
+
 export function onDeviceConnected(
   handler: (device: AndroidDevice) => void,
 ): Promise<UnlistenFn> {

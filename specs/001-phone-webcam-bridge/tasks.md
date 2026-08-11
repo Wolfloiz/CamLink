@@ -484,6 +484,44 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
     setup de mediamtx+ffmpeg desta sessão) — uma câmera real pode levar bem
     mais que 3×3s pra ligar de vez.
 
+- **T065e — Apelido de câmera Android** (pedido do usuário, 2026-08-11,
+  depois de validar T065c em bancada: o nome amigável mostra o modelo bruto
+  do adb, ex. `"SM-S921B (BCDE)"`, não o nome de marketing "Galaxy S24" —
+  o app não tem como saber esse mapeamento sozinho). Usuário pode definir
+  um apelido por serial (ex. "Câmera lateral"), editável direto no card da
+  fonte (lápis ao lado do nome, só em fontes Android — RTSP já tem nome
+  próprio no cadastro).
+  - `AppConfig.device_nicknames: HashMap<String, String>` (chave = serial,
+    mesmo padrão de `last_stream_config`), persistido em `config.toml`.
+    Comandos `set_device_nickname(serial, nickname)` (nickname vazio
+    remove) e `list_device_nicknames()`.
+  - `virtualcam::android_label_discriminator` ganhou um parâmetro
+    `nickname: Option<&str>`: apelido tem prioridade sobre o modelo, com o
+    mesmo sufixo de serial pra desambiguar (o discriminador também é a
+    chave de unicidade do device virtual — 2 aparelhos com o mesmo apelido
+    não podem colidir). 3 testes novos cobrindo prioridade,
+    desambiguação e fallback com apelido em branco.
+  - Frontend: edição inline (lápis → input → Enter/blur salva, Esc cancela)
+    em dois pontos — `SourceCard.svelte` (fonte já ativa) e
+    `DeviceList.svelte` (dispositivo ainda não iniciado); `+page.svelte`
+    carrega os apelidos uma vez (`onMount`) e é a fonte única de verdade
+    passada como prop pros dois (`nicknames`/`onRename`), evitando
+    dessincronia entre o seletor e o card ativo.
+  - **Limitação real descoberta em bancada** (2026-08-11, testado pelo
+    usuário): `v4l2loopback-ctl` não tem verbo de renomear um device já
+    criado (só `add`/`delete`) — renomear com a fonte JÁ transmitindo só
+    atualiza o nome dentro do próprio app (`SourceCard`); o OBS continua
+    mostrando o nome antigo até a fonte ser parada e iniciada de novo (o
+    device virtual, criado com o label antigo, precisaria ser recriado).
+    **Decisão do usuário**: não vale a pena forçar um restart automático ao
+    renomear ao vivo (trocaria o `/dev/videoN`, exigindo reselecionar a
+    fonte no OBS) — o caminho recomendado é renomear ANTES de iniciar, via
+    `DeviceList`, onde o device ainda nem existe.
+  - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
+    (232 testes) e `pnpm check` (0 erros/warnings) confirmados limpos.
+  - **Não verificado ainda**: bancada — apelido definido em `DeviceList`
+    ANTES de iniciar e confirmar que aparece certo no OBS desde o 1º start.
+
 ## Notes
 
 - Spike A tem critério de abortar explícito (T015) — replaneje ANTES de investir nas Phases 4/5/7 se falhar

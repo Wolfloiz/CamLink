@@ -68,21 +68,39 @@ pub fn vcam_label(base: &str, discriminator: &str) -> String {
     sanitize_label(&format!("{base} ({discriminator})"), MAX_LABEL_LEN)
 }
 
-/// Discriminador amigável de fonte Android (T065c): usa o modelo do
-/// aparelho (`AndroidDevice.model`, cacheado em `AppState.devices` desde a
-/// última descoberta via `adb devices -l`) em vez do serial cru, com um
-/// sufixo do próprio serial pra continuar único mesmo com 2 aparelhos do
-/// MESMO modelo plugados ao mesmo tempo (ex.: `"SM-N970F (2ABC)"`). Se o
-/// device ainda não estiver na lista cacheada (corrida rara entre
-/// descoberta e start) ou o modelo vier vazio, cai pro serial puro — nunca
-/// falha, só fica menos amigável.
-pub fn android_label_discriminator(devices: &[AndroidDevice], serial: &str) -> String {
+/// Últimos 4 chars do serial — sufixo curto de desambiguação reaproveitado
+/// tanto pelo nome do modelo quanto pelo apelido (T065e).
+fn serial_suffix(serial: &str) -> String {
+    let chars: Vec<char> = serial.chars().collect();
+    let start = chars.len().saturating_sub(4);
+    chars[start..].iter().collect()
+}
+
+/// Discriminador amigável de fonte Android (T065c/T065e): prioriza o
+/// apelido definido pelo usuário (`nickname`, ex. "Câmera lateral" — o
+/// `model` do adb costuma ser só o nome de código comercial, tipo
+/// "SM-S921B", não o nome de marketing "Galaxy S24"; o app não tem como
+/// saber esse mapeamento, então deixar o usuário nomear é o caminho). Sem
+/// apelido, cai pro modelo do aparelho (`AndroidDevice.model`, cacheado em
+/// `AppState.devices` desde a última descoberta via `adb devices -l`) em
+/// vez do serial cru. Em ambos os casos leva um sufixo do próprio serial
+/// pra continuar único mesmo com 2 aparelhos do MESMO modelo/apelido
+/// plugados ao mesmo tempo (ex.: `"Câmera lateral (2ABC)"`,
+/// `"SM-N970F (2ABC)"`) — o discriminador também é a chave de unicidade do
+/// device virtual (`find_reusable_device`). Se o device ainda não estiver
+/// na lista cacheada (corrida rara entre descoberta e start) ou o modelo
+/// vier vazio, cai pro serial puro — nunca falha, só fica menos amigável.
+pub fn android_label_discriminator(
+    devices: &[AndroidDevice],
+    serial: &str,
+    nickname: Option<&str>,
+) -> String {
+    if let Some(nickname) = nickname.map(str::trim).filter(|n| !n.is_empty()) {
+        return format!("{nickname} ({})", serial_suffix(serial));
+    }
     match devices.iter().find(|d| d.serial == serial) {
         Some(d) if !d.model.trim().is_empty() => {
-            let chars: Vec<char> = serial.chars().collect();
-            let start = chars.len().saturating_sub(4);
-            let suffix: String = chars[start..].iter().collect();
-            format!("{} ({suffix})", d.model.trim())
+            format!("{} ({})", d.model.trim(), serial_suffix(serial))
         }
         _ => serial.to_string(),
     }
@@ -403,7 +421,7 @@ mod tests {
     fn android_label_discriminator_uses_model_and_serial_suffix() {
         let devices = vec![device("R58M12ABCDE", "SM-N970F")];
         assert_eq!(
-            android_label_discriminator(&devices, "R58M12ABCDE"),
+            android_label_discriminator(&devices, "R58M12ABCDE", None),
             "SM-N970F (BCDE)"
         );
     }
@@ -414,8 +432,8 @@ mod tests {
             device("R58M12ABCDE", "SM-N970F"),
             device("HT2ABC091234", "SM-N970F"),
         ];
-        let a = android_label_discriminator(&devices, "R58M12ABCDE");
-        let b = android_label_discriminator(&devices, "HT2ABC091234");
+        let a = android_label_discriminator(&devices, "R58M12ABCDE", None);
+        let b = android_label_discriminator(&devices, "HT2ABC091234", None);
         assert_ne!(a, b);
         assert!(a.starts_with("SM-N970F ("));
         assert!(b.starts_with("SM-N970F ("));
@@ -425,7 +443,7 @@ mod tests {
     fn android_label_discriminator_falls_back_to_serial_when_device_unknown() {
         let devices: Vec<AndroidDevice> = vec![];
         assert_eq!(
-            android_label_discriminator(&devices, "R58M12ABCDE"),
+            android_label_discriminator(&devices, "R58M12ABCDE", None),
             "R58M12ABCDE"
         );
     }
@@ -434,8 +452,37 @@ mod tests {
     fn android_label_discriminator_falls_back_to_serial_when_model_is_blank() {
         let devices = vec![device("R58M12ABCDE", "  ")];
         assert_eq!(
-            android_label_discriminator(&devices, "R58M12ABCDE"),
+            android_label_discriminator(&devices, "R58M12ABCDE", None),
             "R58M12ABCDE"
+        );
+    }
+
+    #[test]
+    fn android_label_discriminator_prefers_nickname_over_model() {
+        let devices = vec![device("R58M12ABCDE", "SM-S921B")];
+        assert_eq!(
+            android_label_discriminator(&devices, "R58M12ABCDE", Some("Câmera lateral")),
+            "Câmera lateral (BCDE)"
+        );
+    }
+
+    #[test]
+    fn android_label_discriminator_nickname_disambiguates_same_nickname_different_devices() {
+        let devices = vec![
+            device("R58M12ABCDE", "SM-S921B"),
+            device("HT2ABC091234", "SM-S921B"),
+        ];
+        let a = android_label_discriminator(&devices, "R58M12ABCDE", Some("Câmera lateral"));
+        let b = android_label_discriminator(&devices, "HT2ABC091234", Some("Câmera lateral"));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn android_label_discriminator_blank_nickname_falls_back_to_model() {
+        let devices = vec![device("R58M12ABCDE", "SM-S921B")];
+        assert_eq!(
+            android_label_discriminator(&devices, "R58M12ABCDE", Some("   ")),
+            "SM-S921B (BCDE)"
         );
     }
 

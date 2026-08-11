@@ -479,11 +479,16 @@ async fn start_stream(
 ) -> Result<StartStreamResponse, AppError> {
     virtualcam::check_capacity(active_source_count(&state).await)?;
 
-    // T065c: nome amigável no seletor do OBS ("SM-N970F (BCDE)" em vez do
-    // serial cru) — cai pro serial puro se o device ainda não estiver no
-    // cache de descoberta.
-    let discriminator =
-        virtualcam::android_label_discriminator(&state.devices.lock().unwrap(), &serial);
+    // T065c/T065e: nome amigável no seletor do OBS — apelido do usuário se
+    // houver ("Câmera lateral (BCDE)"), senão modelo do aparelho ("SM-N970F
+    // (BCDE)"), senão o serial cru se o device ainda não estiver no cache
+    // de descoberta.
+    let nickname = device_nickname_for(&serial);
+    let discriminator = virtualcam::android_label_discriminator(
+        &state.devices.lock().unwrap(),
+        &serial,
+        nickname.as_deref(),
+    );
     let label = virtualcam::vcam_label(VIRTUAL_CAMERA_LABEL, &discriminator);
     let virtual_camera = {
         let mut vcam = state.vcam.lock().unwrap();
@@ -1082,10 +1087,14 @@ async fn restart_android_session(
     };
 
     let can_reuse = cfg!(target_os = "linux") && !force_fresh_vcam;
-    // T065c: mesmo discriminador amigável de `start_stream` — precisa ser
-    // resolvido fora do lock de `vcam` (mutex distinto de `devices`).
-    let discriminator =
-        virtualcam::android_label_discriminator(&state.devices.lock().unwrap(), &serial);
+    // T065c/T065e: mesmo discriminador amigável de `start_stream` — precisa
+    // ser resolvido fora do lock de `vcam` (mutex distinto de `devices`).
+    let nickname = device_nickname_for(&serial);
+    let discriminator = virtualcam::android_label_discriminator(
+        &state.devices.lock().unwrap(),
+        &serial,
+        nickname.as_deref(),
+    );
     let virtual_camera = {
         let mut vcam = state.vcam.lock().unwrap();
         let existing = vcam.camera(&vcam_id).cloned();
@@ -1448,6 +1457,47 @@ async fn list_rtsp_sources() -> Result<Vec<RtspSource>, AppError> {
     let app_config =
         config::load_or_default(&path).map_err(|e| AppError::new("config_load", e.to_string()))?;
     Ok(app_config.rtsp_sources)
+}
+
+/// T065e: define (ou remove, com `nickname` vazio) o apelido de um
+/// dispositivo Android por serial — o `model` do adb costuma ser só o nome
+/// de código comercial ("SM-S921B"), não o nome de marketing ("Galaxy
+/// S24"), e o app não tem como saber esse mapeamento sozinho.
+#[tauri::command]
+async fn set_device_nickname(serial: String, nickname: String) -> Result<(), AppError> {
+    let path = config_path()?;
+    let mut app_config =
+        config::load_or_default(&path).map_err(|e| AppError::new("config_load", e.to_string()))?;
+    let nickname = nickname.trim();
+    if nickname.is_empty() {
+        app_config.device_nicknames.remove(&serial);
+    } else {
+        app_config
+            .device_nicknames
+            .insert(serial, nickname.to_string());
+    }
+    config::save_to(&path, &app_config).map_err(|e| AppError::new("config_save", e.to_string()))?;
+    Ok(())
+}
+
+/// Apelidos persistidos, por serial (a UI resolve o nome exibido a partir
+/// daqui, sem precisar de uma chamada por dispositivo).
+#[tauri::command]
+async fn list_device_nicknames() -> Result<HashMap<String, String>, AppError> {
+    let path = config_path()?;
+    let app_config =
+        config::load_or_default(&path).map_err(|e| AppError::new("config_load", e.to_string()))?;
+    Ok(app_config.device_nicknames)
+}
+
+/// Apelido persistido de um serial, se houver — usado nos pontos de
+/// criação/restart do device virtual (`start_stream`/
+/// `restart_android_session`) pra resolver o discriminador amigável sem a
+/// UI precisar repassar o apelido em toda chamada.
+fn device_nickname_for(serial: &str) -> Option<String> {
+    let path = config_path().ok()?;
+    let app_config = config::load_or_default(&path).ok()?;
+    app_config.device_nicknames.get(serial).cloned()
 }
 
 async fn teardown_rtsp_runtime(state: &State<'_, AppState>, runtime: RtspRuntime) {
@@ -1882,7 +1932,9 @@ pub fn run() {
             raw_snapshot,
             raw_sequence_start,
             raw_sequence_stop,
-            set_raw_output_dir
+            set_raw_output_dir,
+            set_device_nickname,
+            list_device_nicknames
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -36,6 +36,7 @@ fn sample_config() -> AppConfig {
         last_stream_config,
         raw_output_dir: Some(PathBuf::from("/home/user/Imagens/CamLink")),
         auto_connect: vec!["R58M12ABCDE".into()],
+        device_nicknames: HashMap::new(),
     }
 }
 

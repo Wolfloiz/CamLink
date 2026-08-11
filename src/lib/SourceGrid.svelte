@@ -9,11 +9,13 @@
     expandedId,
     onSelect,
     onStop,
+    onRename,
   }: {
     sources: ActiveSource[];
     expandedId: string | null;
     onSelect: (id: string) => void;
     onStop: (source: ActiveSource) => void;
+    onRename?: (source: ActiveSource, name: string) => void;
   } = $props();
 </script>
 
@@ -24,6 +26,9 @@
       expanded={source.id === expandedId}
       onExpand={() => onSelect(source.id)}
       onStop={() => onStop(source)}
+      onRename={source.kind === "android" && onRename
+        ? (name) => onRename(source, name)
+        : undefined}
     />
   {/each}
 
