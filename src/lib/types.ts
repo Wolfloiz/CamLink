@@ -232,3 +232,31 @@ export const DEFAULT_STREAM_CONFIG: Omit<StreamConfig, "camera_id"> = {
   bitrate: 8_000_000,
   codec: "h264",
 };
+
+// --- US6: múltiplas fontes simultâneas (grade de cards) ---
+
+/** Limite prático de fontes simultâneas (espelha
+ * `virtualcam::MAX_CONCURRENT_SOURCES` em src-tauri; FR-021). */
+export const MAX_CONCURRENT_SOURCES = 4;
+
+/** Uma fonte (Android ou RTSP) atualmente ativa, exibida como card na
+ * grade — unifica os dois tipos numa forma comum pro `SourceCard.svelte`
+ * não precisar conhecer a diferença. */
+export interface ActiveSource {
+  kind: "android" | "rtsp";
+  /** Android: mesmo valor que `sessionId` (muda em restart). RTSP: id
+   * estável da fonte configurada (usado por `stopRtsp`/`removeRtspSource`,
+   * nunca muda mesmo que a sessão reinicie). */
+  id: string;
+  /** Sessão de stream corrente — usada pelo `Preview`/`setControl`/etc.
+   * Igual a `id` no caso Android; independente no caso RTSP. */
+  sessionId: string;
+  name: string;
+  /** Linha secundária do card: "adb · USB · <serial>" ou a URL RTSP. */
+  meta: string;
+  state: SessionState;
+  stats: SessionStats | null;
+  /** Só Android: necessário pra ModeSelector/CameraControls/RawPanel. */
+  serial?: string;
+  controlState?: ControlState | null;
+}

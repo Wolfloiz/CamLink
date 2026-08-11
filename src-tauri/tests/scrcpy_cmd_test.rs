@@ -38,7 +38,7 @@ fn config_h265() -> StreamConfig {
 
 #[test]
 fn client_args_target_camera_source_and_v4l2_sink() {
-    let args = build_scrcpy_client_args(&config_h264(), "/dev/video3");
+    let args = build_scrcpy_client_args(&config_h264(), "/dev/video3", "R58M12ABCDE");
     assert!(args.contains(&"--video-source=camera".to_string()));
     assert!(args.contains(&"--v4l2-sink=/dev/video3".to_string()));
     assert!(args.contains(&"--camera-id=0".to_string()));
@@ -50,7 +50,7 @@ fn client_args_target_camera_source_and_v4l2_sink() {
 
 #[test]
 fn client_args_select_h265_codec() {
-    let args = build_scrcpy_client_args(&config_h265(), "/dev/video0");
+    let args = build_scrcpy_client_args(&config_h265(), "/dev/video0", "R58M12ABCDE");
     assert!(args.contains(&"--video-codec=h265".to_string()));
     assert!(args.contains(&"--camera-size=1280x720".to_string()));
     assert!(args.contains(&"--camera-fps=60".to_string()));
@@ -58,10 +58,20 @@ fn client_args_select_h265_codec() {
 
 #[test]
 fn client_args_are_headless_no_audio_no_control() {
-    let args = build_scrcpy_client_args(&config_h264(), "/dev/video0");
+    let args = build_scrcpy_client_args(&config_h264(), "/dev/video0", "R58M12ABCDE");
     assert!(args.contains(&"--no-window".to_string()));
     assert!(args.contains(&"--no-audio".to_string()));
     assert!(args.contains(&"--no-control".to_string()));
+}
+
+// Bug real em bancada 2026-08-08 (T065): com 2+ celulares Android plugados
+// ao mesmo tempo, o cliente scrcpy sem `--serial` não sabe qual escolher
+// ("Multiple ADB devices ... Select a device via -s") e a sessão entra num
+// loop infinito de reconexão — nunca chega a rodar de verdade.
+#[test]
+fn client_args_include_serial_to_disambiguate_multiple_devices() {
+    let args = build_scrcpy_client_args(&config_h264(), "/dev/video3", "R58M12ABCDE");
+    assert!(args.contains(&"--serial=R58M12ABCDE".to_string()));
 }
 
 // ---------------------------------------------------------------------------

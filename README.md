@@ -67,7 +67,9 @@ cargo fmt --check && cargo clippy -- -D warnings && cargo test
   (confirmado: nenhum evento de add/remove/change no kernel), mas o Meet às
   vezes marca a câmera como indisponível e não recupera sozinho — nem
   esperando alguns segundos. **F5 na aba (ou sair e entrar de novo na
-  chamada) resolve.**
+  chamada) resolve.** Reproduzido também num Moto G55 (2026-08-03), então
+  não é peculiaridade do S20 FE — parece ser inerente ao caminho de restart
+  do scrcpy no Linux (`--v4l2-sink`), independente de fabricante.
 - **Em alguns aparelhos Samsung, reconectar após um restart pode entrar num
   ciclo de falhas/artefatos que não se autorrecupera** (visto em bancada com
   um SM-G781B — o app tenta de novo com backoff, mas o dispositivo às vezes
@@ -85,6 +87,21 @@ cargo fmt --check && cargo clippy -- -D warnings && cargo test
   preview concorrente) não reproduziram em testes isolados — o disparo real
   parece exigir o padrão de uso completo do app. **Ainda sem decisão de
   como tratar definitivamente; será decidido antes da versão release.**
+- **Fonte RTSP pode parar de reconectar sozinha depois de uma queda, exigindo
+  reiniciar o app** (achado em bancada durante a validação do T054,
+  2026-08-03, com um servidor RTSP local simulado). Confirmado via `fuser
+  -v` que dois processos `ffmpeg` distintos chegaram a manter o mesmo device
+  `v4l2loopback` aberto ao mesmo tempo — um deles vazado (nunca encerrado
+  numa tentativa anterior) — causando `ioctl(VIDIOC_G_FMT): Invalid
+  argument` / `Could not write header` no writer novo, reproduzido também
+  chamando o mesmo comando manualmente fora do app. Depois de matar o
+  processo vazado e liberar o device, o supervisor de reconexão do RTSP
+  **não retomou sozinho** (nenhuma nova tentativa nos logs do servidor por
+  mais de 1 minuto) — indício de que a tarefa de reconexão trava esperando
+  algo (suspeita: o leitor de snapshot do preview, que também ficou preso
+  bloqueado num `read_exact` sem nenhum writer produzindo frame nesse
+  intervalo). **Causa raiz ainda não corrigida** — ver item correspondente
+  em `specs/001-phone-webcam-bridge/tasks.md` § Débito técnico.
 
 ## Licença
 

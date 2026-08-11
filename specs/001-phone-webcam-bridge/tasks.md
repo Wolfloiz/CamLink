@@ -178,7 +178,7 @@ do fork, Java), `installer/{linux,windows}/`.
 - [x] T051 [US4] Implementar `src-tauri/src/rtsp_manager.rs`: subprocess ffmpeg (Linux `-f v4l2`; Windows rawvideo→`feed_frame`), lifecycle com standby/reconexão, erros de auth/host acionáveis; emitir `preview_frame` 1 fps também para sessões RTSP nas duas plataformas (Linux: leitura do device virtual; Windows: tap no pipe rawvideo — FR-023)
 - [x] T052 [US4] Comandos Tauri `add_rtsp_source`/`remove_rtsp_source` (senha→keyring; remoção limpa o segredo), `start_rtsp`/`stop_rtsp` em `src-tauri/src/lib.rs`
 - [x] T053 [P] [US4] Frontend: `src/lib/RtspPanel.svelte` (nome/URL/senha, status, remover)
-- [ ] T054 [US4] Validação manual: quickstart Cenário 4 (mediamtx simulado + câmera real; latência ≤ 300 ms; senha ausente do arquivo de config)
+- [ ] T054 [US4] Validação manual: quickstart Cenário 4 (mediamtx simulado + câmera real; latência ≤ 300 ms; senha ausente do arquivo de config) — **parcialmente validado (2026-08-03)**: fonte conecta (após corrigir a convenção de credencial na URL), latência ok, senha nunca aparece no `config.toml`, senha errada dá erro claro. **Bloqueado**: reconexão automática após queda da fonte não se autorrecupera de forma confiável — ver bug em "Débito técnico" abaixo. Fechar só depois desse bug resolvido.
 
 **Checkpoint**: US4 funcional e independente (só requer Phase 2)
 
@@ -215,13 +215,13 @@ do fork, Java), `installer/{linux,windows}/`.
 
 ### Tests for User Story 6 (REQUIRED) ⚠️
 
-- [ ] T062 [P] [US6] Testes de orquestração multi-sessão (N sessões independentes, queda de uma não afeta outra, limite prático de 4, cleanup ao encerrar app) com backends mock em `src-tauri/tests/multi_session_test.rs`
+- [x] T062 [P] [US6] Testes de orquestração multi-sessão (N sessões independentes, queda de uma não afeta outra, limite prático de 4, cleanup ao encerrar app) com backends mock em `src-tauri/tests/multi_session_test.rs` — 5 testes cobrindo 2 celulares Android + 2 fontes RTSP concorrentes (`four_mixed_sources_run_independently`, `one_session_crash_does_not_affect_others`, `stopping_one_leaves_others_running`, `fifth_concurrent_session_is_rejected`, `stopping_all_four_sources_completes_without_orphans`). Investigação revelou que `AppState.sessions`/`AppState.rtsp` (lib.rs) e `StreamManager`/`rtsp_manager::start_session` **já eram** registries multi-sessão (T063 em grande parte já feito estruturalmente) — o gap real era (1) `VIRTUAL_CAMERA_LABEL`/`RTSP_CAMERA_LABEL` globais fazendo uma 2ª fonte roubar o device v4l2 da 1ª, corrigido com `virtualcam::vcam_label(base, discriminator)` (serial/id da fonte) nos 3 call sites de `lib.rs`; (2) nenhum cap de 4 fontes, corrigido com `virtualcam::{MAX_CONCURRENT_SOURCES, check_capacity}` chamado em `start_stream`/`start_rtsp` antes de alocar qualquer recurso. Testes puros novos em `tests/v4l2_test.rs` (label). **Achado colateral importante**: `tests/bin/fake_backend.rs` não tratava `adb shell pkill/pgrep` (chamada de `spawn_backend` que mata um `scrcpy-server` remanescente antes de subir um novo) como setup rápido — caía no `stay_alive()` de 3600s, travando QUALQUER teste baseado em `StreamManager` nesta engine (inclusive os pré-existentes de `stream_lifecycle_test.rs`, que pareciam "lentos" mas na verdade estavam travados). Corrigido adicionando `pkill`/`pgrep` ao fast-path do fake — toda a suíte roda em segundos agora. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` e todos os arquivos de teste (17 arquivos, 100% verde) confirmados.
 
 ### Implementation for User Story 6
 
-- [ ] T063 [US6] Refatorar `stream_manager.rs`/`rtsp_manager.rs` para registry de sessões concorrentes (`HashMap<SessionId, …>` sob tokio), isolamento de falha por sessão (FR-021)
-- [ ] T064 [US6] Frontend: UI multi-fonte (cards por sessão com preview/status/controles próprios) em `src/routes/+page.svelte`
-- [ ] T065 [US6] Validação manual: quickstart Cenário 6 (duas fontes no OBS, queda isolada, preview com CPU < 5% — SC-007)
+- [ ] T063 [US6] Refatorar `stream_manager.rs`/`rtsp_manager.rs` para registry de sessões concorrentes (`HashMap<SessionId, …>` sob tokio), isolamento de falha por sessão (FR-021) — **maior parte já estava feita** (ver nota do T062: registries e tasks por sessão já existiam); a fatia que realmente faltava (label único por fonte + cap de 4) foi implementada junto com T062. O que resta aqui, se algo: comportamento multi-instância do backend DShow no Windows (não verificado, follow-up)
+- [x] T064 [US6] Frontend: UI multi-fonte (cards por sessão com preview/status/controles próprios) em `src/routes/+page.svelte` — design prototipado no Penpot (board "CamLink — Multi Source / Dark") antes de implementar, reaproveitando os componentes existentes (PreviewCard/ModeSelector/ControlsCard). Implementação: `ActiveSource`/`MAX_CONCURRENT_SOURCES` (`types.ts`, espelha `virtualcam::MAX_CONCURRENT_SOURCES`), `SourceCard.svelte` (card compacto: miniatura ao vivo via `Preview`, pill de status, nome/fps/meta, parar) e `SourceGrid.svelte` (grade + card fantasma "Adicionar fonte") novos; `+page.svelte` reescrito pra tratar `sources: ActiveSource[]` (Android + RTSP misturados) em vez de uma única sessão — `onSessionState`/`onSessionReplaced`/`onControlState` agora atualizam a fonte certa no array por `sessionId`; clique no card expande um painel abaixo da grade com Preview grande + Modo + Controles + RAW (só Android) reaproveitando os componentes existentes sem duplicação. `RtspPanel.svelte` refatorado: estado "rodando" por fonte deixou de ser interno (`running` local) e passou a vir de `activeIds` (prop derivada de `sources` no pai) — fonte única de verdade entre o card na grade e o painel lateral, evitando dessincronia. `pnpm check` limpo (0 erros); fluxo completo (selecionar → iniciar → aparece na grade → expande com controles reais → parar → remove e fecha o painel) validado via Playwright com Tauri mockado (sem hardware).
+- [x] T065 [US6] Validação manual: quickstart Cenário 6 (duas fontes no OBS, queda isolada, preview com CPU < 5% — SC-007) — testado em hardware real (2026-08-08) com escopo ampliado: 3 celulares Android (SM-N970F, SM-G781B, SM-S921B) + 1 câmera RTSP simultâneos (as 4 fontes do cap de `MAX_CONCURRENT_SOURCES`). **Bug real encontrado e corrigido**: `scrcpy`/`adb` eram invocados sem `--serial`/`-s <serial>` no pipeline Linux (cliente scrcpy, cleanup `pkill`/`pgrep` pré-spawn) e no bootstrap do servidor Windows (`push`/`forward`/`app_process`) — com 1 device plugado o adb escolhia sozinho, mascarando o bug; com 2+ simultâneos o scrcpy recusava escolher ("Multiple ADB devices ... Select a device via -s") e a sessão entrava em loop infinito de reconexão, nunca chegando a rodar. Corrigido threading `serial: &str` por todo `spawn_backend`/`build_scrcpy_client_args(_oriented)`/`bootstrap_windows_server`/`monitor_session` em `stream_manager.rs`; teste de regressão `client_args_include_serial_to_disambiguate_multiple_devices` em `scrcpy_cmd_test.rs`. Depois do fix: as 4 fontes streimam de forma independente no OBS (latência subjetivamente maior com a carga de 4, mas sem impacto perceptível na transmissão — como já relatado em T061/SC-006), e a queda de 1 fonte (quirk de brilho adaptativo do SM-S921B reconectando sozinho, já documentado) não afetou as outras 3 — isolamento de falha (FR-021) confirmado em hardware com fontes reais, não só nos testes de T062. **Achado colateral, corrigido**: o preview *interno do app* (não o output do OBS) piscava entre a imagem e "Aguardando primeiro frame" nas 4 fontes sob essa carga — causa raiz: no Linux, todo source (Android via `--v4l2-sink` do scrcpy, RTSP via `-f v4l2` do ffmpeg) escrevia direto no device v4l2loopback, e como o módulo só admite 1 LEITOR por vez (`exclusive_caps=1`), o preview (que lê de volta do mesmo device) entrava em disputa constante com o OBS pelo slot assim que havia um consumidor real — indiferente de qual fonte, por isso todas piscavam junto. RTSP corrigido nesta sessão: Linux passou a usar o mesmo caminho sem read-back que o Windows já usa (ffmpeg decodifica rawvideo no stdout → `FrameSink` → `feed_frame` na câmera virtual + preview do mesmo buffer, `start_rtsp` em `lib.rs`), eliminando a disputa pra RTSP. **Android/Linux NÃO corrigido nesta sessão** (decisão consciente do usuário, ver Débito técnico abaixo) — exigiria portar o pipeline Android do Linux pro mesmo mecanismo de socket de vídeo + decode próprio que o Windows já usa (T024), escopo do tamanho da implementação original, feito como task separada com TDD completo em vez de ao vivo com hardware plugado.
 
 **Checkpoint**: todas as user stories funcionais
 
@@ -307,6 +307,117 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
 (US4) + instaladores; qualquer um → US6 quando as duas trilhas fecharem.
 
 ---
+
+## Débito técnico / melhorias futuras
+
+- **Bloqueia T054**: bug de concorrência no device v4l2 entre o writer da
+  sessão RTSP (Linux) e o leitor de snapshot do preview — reconexão
+  automática após queda da fonte RTSP pode nunca se recuperar sozinha
+  (documentado em `README.md` § Limitações conhecidas, achado em bancada
+  2026-08-03). Evidência: `fuser -v` mostrou dois processos `ffmpeg`
+  simultâneos no mesmo device (um vazado, nunca encerrado); mesmo depois de
+  matar o processo vazado e liberar o device, o supervisor de reconexão não
+  retomou sozinho — suspeita de deadlock envolvendo o leitor de preview
+  bloqueado em `read_exact` sem writer ativo. **Possivelmente resolvido como
+  efeito colateral do fix de T065** (2026-08-08): RTSP no Linux deixou de
+  fazer read-back do device pra gerar preview (o leitor de snapshot que
+  suspeitávamos travado nem existe mais nesse caminho) — precisa reabrir
+  T054 e reconfirmar em bancada antes de fechar, mas a causa suspeita
+  (leitor de preview vs. writer da sessão disputando o mesmo device) não se
+  aplica mais à arquitetura atual.
+
+- **Preview interno do app pisca sob carga com Android/Linux** (achado em
+  bancada 2026-08-08, T065, com 3 celulares + 1 RTSP simultâneos + OBS
+  consumindo as 4 fontes): mesma causa raiz do item acima (v4l2loopback só
+  admite 1 leitor por vez — `exclusive_caps=1` — e o preview lê de volta do
+  device disputando o slot com o OBS), mas só corrigido pro RTSP nesta
+  sessão (ver nota do T065). Pra fontes Android no Linux o bug persiste: o
+  cliente `scrcpy` ainda escreve direto no device via `--v4l2-sink`
+  (`stream_manager.rs::spawn_backend`), então o preview continua fazendo
+  read-back e piscando sob disputa real com um consumidor. **Não afeta o
+  output real (OBS)** — só a miniatura de conveniência dentro do app.
+  Correção completa exige portar o pipeline Android do Linux pro mesmo
+  mecanismo que o Windows já usa (bootstrap direto do servidor via socket
+  de vídeo — `bootstrap_windows_server`/`run_video_pipeline` em
+  `stream_manager.rs`, hoje `#[cfg(target_os = "windows")]` — + decode
+  próprio em vez do cliente `scrcpy`/`--v4l2-sink`), eliminando o read-back
+  de vez, igual foi feito pro RTSP. Escopo do tamanho da implementação
+  original do pipeline Android (T024): requer TDD completo (constituição
+  Princípio III) e revalida toda a trilha MVP já validada em hardware
+  (T029) — tratar como task própria, não ajuste pontual. Efeito colateral
+  esperado se/quando corrigido: também resolveria o bug de giro/espelho
+  precisando de F5 no Linux (item abaixo), já que passaria a aplicar
+  `frame_transform` ao vivo como o Windows faz, em vez de reiniciar o
+  cliente scrcpy via `--capture-orientation`.
+
+- Bug de giro/espelho no Linux exigindo F5 no Meet/Chrome (não bloqueia
+  fases atuais, documentado em
+  `README.md` § Limitações conhecidas) — reproduzido em 2 aparelhos
+  diferentes (SM-G781B e Moto G55, 2026-08-03), então não é peculiaridade de
+  fabricante. Decisão de investigar/corrigir adiada a pedido do usuário;
+  candidato a investigação futura (possível causa: o Meet não relê o device
+  v4l2 depois do restart do processo scrcpy).
+
+- **T065c — Nome amigável das câmeras no seletor do OBS** (pedido do
+  usuário, 2026-08-10, após validar T065 em bancada com 4 fontes: "confuso
+  saber qual é qual"). Pesquisa feita nesta sessão:
+  - O device v4l2/DirectShow já é único por fonte desde T062
+    (`virtualcam::vcam_label(base, discriminator)`), mas o `discriminator`
+    hoje é o dado técnico bruto: `serial` do adb pra Android
+    (`lib.rs:482,1090`) e o `Uuid` da fonte pra RTSP (`lib.rs:1491`) — daí
+    o nome que aparece no OBS ser algo como `CamLink Android (R58M12ABCDE)`
+    ou `CamLink IP (a1b2c3d4-...)`, sem relação com o aparelho/câmera real.
+  - **RTSP já tem o dado certo pronto pra usar**: `RtspSource.name`
+    (`model.rs:109`) é o nome amigável que o próprio usuário digita no
+    formulário (`RtspPanel.svelte`, ex.: "Câmera do portão") — só não está
+    sendo usado como discriminador. Troca direta: `id.to_string()` →
+    `source.name` em `start_rtsp` (`lib.rs:1491`).
+  - **Android tem quase tudo pronto**: `AndroidDevice.model` (`model.rs:29`,
+    ex.: `"SM-N970F"`) já vem do `adb devices -l` e já está cacheado em
+    `AppState.devices` (`lib.rs:231`) — `start_stream`/`restart_android_session`
+    só recebem `serial: String` do frontend, mas podem resolver o `model`
+    olhando `state.devices.lock()` pelo `serial` sem mudar a API do
+    frontend. Precisa de um discriminador estável mesmo com 2 aparelhos do
+    MESMO modelo plugados ao mesmo tempo — usar
+    `format!("{model} ({sufixo_do_serial})")` (ex.: 4 últimos chars do
+    serial) em vez do model sozinho.
+  - **Risco a tratar**: `card_label` do v4l2loopback tem limite de tamanho
+    do kernel (struct de 32 bytes) — hoje não há truncamento/sanitização
+    em `vcam_label`/`build_add_args`; nomes de RTSP digitados livremente
+    pelo usuário (ou modelos Android + sufixo) podem estourar isso e falhar
+    silenciosamente ou truncar de forma feia. Precisa de um limite
+    explícito + teste (`tests/v4l2_test.rs`) antes de expor no OBS.
+  - **Implementado em 2026-08-10** (mesma sessão do planejamento, TDD):
+    1. `virtualcam::sanitize_label(raw, max_len)` pura (trim, colapsa
+       espaços, corta por `char` — não por byte — em `MAX_LABEL_LEN = 31`,
+       o limite do `card_label` do v4l2loopback) + `vcam_label` passou a
+       sanitizar sempre o resultado composto.
+    2. `virtualcam::android_label_discriminator(devices, serial)`: resolve
+       `AndroidDevice.model` via `AppState.devices` (já cacheado) e monta
+       `"{model} ({4 últimos chars do serial})"` (ex.: `"SM-N970F (BCDE)"`);
+       cai pro serial puro se o device ainda não estiver no cache ou o
+       model vier vazio. Usado em `start_stream` (`lib.rs`) e
+       `restart_android_session`.
+    3. `virtualcam::rtsp_label_discriminator(name, id)`: usa
+       `RtspSource.name` + um sufixo curto do `Uuid` (ex.:
+       `"Câmera do portão #a1b2"`) — o sufixo é necessário porque o
+       discriminador também é a CHAVE de unicidade do device
+       (`find_reusable_device`); sem ele, duas fontes RTSP com o mesmo
+       nome roubariam o device uma da outra (mesmo bug do T062). Usado em
+       `start_rtsp`.
+    4. 11 testes novos (`virtualcam::tests`, inline em `mod.rs` — módulo
+       cross-platform, não Linux-only como `v4l2_test.rs`): sanitização
+       (trim/colapso/corte seguro em UTF-8), `vcam_label` nunca estoura
+       `MAX_LABEL_LEN`, discriminador Android usa modelo+sufixo e
+       desambigua 2 aparelhos do mesmo modelo, discriminador RTSP usa o
+       nome e desambigua 2 fontes com o mesmo nome. Suíte completa (21
+       arquivos), `cargo fmt --check` e `cargo clippy --all-targets -- -D
+       warnings` confirmados limpos.
+    5. **Não verificado ainda**: confirmação visual em bancada (nome novo
+       aparecendo certo no seletor de câmera do OBS/Chrome com 2+ fontes
+       do mesmo modelo Android plugadas) e no Windows/DirectShow (mesmo
+       `label` é consumido, mas o comportamento real do filtro com esses
+       nomes não foi testado nessa plataforma).
 
 ## Notes
 

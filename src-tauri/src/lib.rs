@@ -249,6 +249,13 @@ struct AppState {
     restart_locks: TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>,
 }
 
+/// Conta fontes ativas nos dois registries (Android + RTSP) para o gate de
+/// capacidade (`virtualcam::check_capacity`, FR-021) — chamado ANTES de
+/// alocar qualquer recurso pra nova fonte.
+async fn active_source_count(state: &State<'_, AppState>) -> usize {
+    state.sessions.lock().await.len() + state.rtsp.lock().await.len()
+}
+
 /// Lock de restart do device (ver doc de `AppState::restart_locks`):
 /// cria sob demanda, nunca remove (poucos devices distintos por sessão de
 /// uso — não vale a complexidade de recolher entradas).
@@ -470,9 +477,17 @@ async fn start_stream(
     serial: String,
     config: StreamConfig,
 ) -> Result<StartStreamResponse, AppError> {
+    virtualcam::check_capacity(active_source_count(&state).await)?;
+
+    // T065c: nome amigável no seletor do OBS ("SM-N970F (BCDE)" em vez do
+    // serial cru) — cai pro serial puro se o device ainda não estiver no
+    // cache de descoberta.
+    let discriminator =
+        virtualcam::android_label_discriminator(&state.devices.lock().unwrap(), &serial);
+    let label = virtualcam::vcam_label(VIRTUAL_CAMERA_LABEL, &discriminator);
     let virtual_camera = {
         let mut vcam = state.vcam.lock().unwrap();
-        vcam.create(VIRTUAL_CAMERA_LABEL, config.resolution, config.fps)
+        vcam.create(&label, config.resolution, config.fps)
             .map_err(|e| AppError::new("vcam_create_failed", e.to_string()))?
     };
     let vcam_id = virtual_camera.id;
@@ -1067,6 +1082,10 @@ async fn restart_android_session(
     };
 
     let can_reuse = cfg!(target_os = "linux") && !force_fresh_vcam;
+    // T065c: mesmo discriminador amigável de `start_stream` — precisa ser
+    // resolvido fora do lock de `vcam` (mutex distinto de `devices`).
+    let discriminator =
+        virtualcam::android_label_discriminator(&state.devices.lock().unwrap(), &serial);
     let virtual_camera = {
         let mut vcam = state.vcam.lock().unwrap();
         let existing = vcam.camera(&vcam_id).cloned();
@@ -1077,10 +1096,11 @@ async fn restart_android_session(
             Some(cam) if can_reuse => cam,
             _ => {
                 let _ = vcam.destroy(&vcam_id);
+                let label = virtualcam::vcam_label(VIRTUAL_CAMERA_LABEL, &discriminator);
                 if cfg!(target_os = "linux") && force_fresh_vcam {
-                    vcam.create_fresh(VIRTUAL_CAMERA_LABEL, output_dims, config.fps)
+                    vcam.create_fresh(&label, output_dims, config.fps)
                 } else {
-                    vcam.create(VIRTUAL_CAMERA_LABEL, output_dims, config.fps)
+                    vcam.create(&label, output_dims, config.fps)
                 }
                 .map_err(|e| AppError::new("vcam_create_failed", e.to_string()))?
             }
@@ -1452,6 +1472,7 @@ async fn start_rtsp(
     if state.rtsp.lock().await.contains_key(&id) {
         return Err(AppError::new("rtsp_already_running", "Fonte já está ativa"));
     }
+    virtualcam::check_capacity(active_source_count(&state).await)?;
 
     let path = config_path()?;
     let app_config =
@@ -1476,9 +1497,13 @@ async fn start_rtsp(
     // qualquer recurso.
     rtsp_manager::probe_url(&paths.ffmpeg, &runtime_url).await?;
 
+    // T065c: nome amigável no seletor do OBS (o nome que o usuário deu à
+    // fonte, ex. "Câmera do portão") em vez do Uuid cru.
+    let discriminator = virtualcam::rtsp_label_discriminator(&source.name, &id);
+    let label = virtualcam::vcam_label(RTSP_CAMERA_LABEL, &discriminator);
     let virtual_camera = {
         let mut vcam = state.vcam.lock().unwrap();
-        vcam.create(RTSP_CAMERA_LABEL, RTSP_RESOLUTION, RTSP_FPS)
+        vcam.create(&label, RTSP_RESOLUTION, RTSP_FPS)
             .map_err(|e| AppError::new("vcam_create_failed", e.to_string()))?
     };
     let vcam_id = virtual_camera.id;
@@ -1497,15 +1522,24 @@ async fn start_rtsp(
         let _ = app_for_preview.emit("preview_frame", payload);
     });
 
-    // Windows: frames RGBA chegam pelo sink → câmera virtual + preview.
-    // Linux: o ffmpeg escreve direto no device; preview via snapshots.
+    // Frames RGBA decodificados pelo ffmpeg (rawvideo no stdout) chegam
+    // pelo sink → câmera virtual (`feed_frame`, escrito pelo ffmpeg PRÓPRIO
+    // do `V4l2Backend`) + preview, no Linux e no Windows igualmente. Antes o
+    // Linux escrevia direto no device (`-f v4l2`) e o preview lia de volta
+    // do mesmo `/dev/videoN` — como o v4l2loopback só admite um LEITOR por
+    // vez (`exclusive_caps=1`), o preview entrava em disputa constante com
+    // o OBS pelo slot de leitura assim que havia um consumidor real, e
+    // piscava (achado em bancada com 3 celulares + 1 RTSP simultâneos,
+    // 2026-08-08 — T065). Unificado com o caminho já usado pelo Windows:
+    // sem read-back nenhum, preview e câmera virtual vêm do MESMO buffer
+    // decodificado.
     #[allow(unused_variables)]
     let (sink, v4l2_device, preview_task): (
         Option<FrameSink>,
         Option<String>,
         Option<tokio::task::JoinHandle<()>>,
     );
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         let vcam_handle = Arc::clone(&state.vcam);
         let preview_last = Arc::clone(&preview_last);
@@ -1525,29 +1559,6 @@ async fn start_rtsp(
         sink = Some(frame_sink);
         v4l2_device = None;
         preview_task = None;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let device = virtual_camera.backend_path.clone();
-        let preview_last = Arc::clone(&preview_last);
-        let preview_sink: FrameSink = Arc::new(move |frame: &[u8]| {
-            publish_preview(
-                &preview_last,
-                &preview_tx,
-                frame,
-                preview_dims,
-                preview_dims,
-                false,
-            );
-        });
-        preview_task = Some(tokio::spawn(stream_manager::run_preview_pipeline(
-            paths.ffmpeg.clone(),
-            device.clone(),
-            RTSP_RESOLUTION,
-            preview_sink,
-        )));
-        sink = None;
-        v4l2_device = Some(device);
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {

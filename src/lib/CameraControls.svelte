@@ -321,8 +321,8 @@
   }
 
   .toggles button.active {
-    background: #4a8cff;
-    border-color: #4a8cff;
+    background: #6d5cf5;
+    border-color: #6d5cf5;
     color: white;
   }
 

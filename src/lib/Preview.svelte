@@ -78,7 +78,6 @@
   .preview {
     aspect-ratio: 16 / 9;
     width: 100%;
-    max-width: 480px;
     background: #111;
     border-radius: 8px;
     overflow: hidden;

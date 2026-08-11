@@ -12,8 +12,11 @@
 //! - `FAKE_BACKEND_STDERR_LINE`: usado só em `stderr_error`, texto a emitir.
 //!
 //! Chamadas de setup curtas (`push`/`forward`, usadas só no bootstrap
-//! Windows de research.md R12) sempre retornam sucesso imediato,
-//! independente do modo, para não interferir na fase de setup.
+//! Windows de research.md R12; `pkill`/`pgrep`, usadas no Linux por
+//! `spawn_backend` para matar um `scrcpy-server` remanescente ANTES de subir
+//! um novo — ver doc de `spawn_backend` em `stream_manager.rs`) sempre
+//! retornam sucesso imediato, independente do modo, para não interferir na
+//! fase de setup nem cair no `stay_alive()` (3600s) por engano.
 
 use std::env;
 use std::path::Path;
@@ -23,7 +26,10 @@ use std::time::Duration;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
-    if args.iter().any(|a| a == "push" || a == "forward") {
+    if args
+        .iter()
+        .any(|a| a == "push" || a == "forward" || a == "pkill" || a == "pgrep")
+    {
         return ExitCode::SUCCESS;
     }
 

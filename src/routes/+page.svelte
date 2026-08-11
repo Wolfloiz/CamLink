@@ -4,23 +4,25 @@
   import DeviceList from "$lib/DeviceList.svelte";
   import ModeSelector from "$lib/ModeSelector.svelte";
   import Preview from "$lib/Preview.svelte";
+  import RawPanel from "$lib/RawPanel.svelte";
   import RtspPanel from "$lib/RtspPanel.svelte";
+  import SourceGrid from "$lib/SourceGrid.svelte";
   import {
     onControlState,
     onSessionReplaced,
     onSessionState,
     setControl,
     startStream,
+    stopRtsp,
     stopStream,
   } from "$lib/api";
   import {
     DEFAULT_STREAM_CONFIG,
-    isSessionActive,
     isSessionError,
+    MAX_CONCURRENT_SOURCES,
+    type ActiveSource,
     type AndroidDevice,
-    type ControlState,
-    type SessionState,
-    type SessionStats,
+    type RtspSource,
     type StartStreamResponse,
     type StreamConfig,
     type VideoCodec,
@@ -40,50 +42,92 @@
   let codec = $state<VideoCodec>(DEFAULT_STREAM_CONFIG.codec);
   const cameraId = "0";
 
-  let sessionId = $state<string | null>(null);
-  let sessionState = $state<SessionState | null>(null);
-  let sessionStats = $state<SessionStats | null>(null);
-  let controlState = $state<ControlState | null>(null);
+  // US6 — Fontes ativas simultâneas (até MAX_CONCURRENT_SOURCES, T062): cada
+  // uma vira um card na grade; no máximo uma fica "expandida" por vez
+  // (controles completos), igual ao design aprovado no Penpot.
+  let sources = $state<ActiveSource[]>([]);
+  let expandedId = $state<string | null>(null);
+  const expandedSource = $derived(
+    sources.find((s) => s.id === expandedId) ?? null,
+  );
+
   let starting = $state(false);
-  let stopping = $state(false);
   let errorMsg = $state<string | null>(null);
   let actionHint = $state<string | null>(null);
 
-  const active = $derived(sessionId !== null);
+  const rtspActiveIds = $derived(
+    sources.filter((s) => s.kind === "rtsp").map((s) => s.id),
+  );
 
-  // Sessão RTSP ativa mais recente (preview independente da sessão Android).
-  let rtspSessionId = $state<string | null>(null);
+  // Aba da fonte selecionada na barra lateral (puramente visual — Android e
+  // RTSP continuam podendo transmitir ao mesmo tempo, US6).
+  let sourceTab = $state<"android" | "rtsp">("android");
 
   let unlistenSessionState: (() => void) | null = null;
   let unlistenSessionReplaced: (() => void) | null = null;
   let unlistenControlState: (() => void) | null = null;
 
   $effect(() => {
+    // Só sessões Android emitem esses eventos (RTSP não tem, ainda) —
+    // procuramos a fonte correspondente pelo session_id corrente.
     onSessionState((event) => {
-      if (event.session_id !== sessionId) return;
-      sessionState = event.state;
-      sessionStats = event.stats;
+      const idx = sources.findIndex((s) => s.sessionId === event.session_id);
+      if (idx === -1) return;
       if (event.state === "idle") {
-        sessionId = null;
+        const removedId = sources[idx].id;
+        sources = sources.filter((_, i) => i !== idx);
+        if (expandedId === removedId) expandedId = null;
+        return;
       }
+      // `session_state` chega a cada ~250ms POR sessão (research: mantém o
+      // fps do stream atualizado) — com 4 fontes simultâneas (US6/T065) isso
+      // é ~16 eventos/s reconstruindo o array inteiro de `sources`, mesmo
+      // quando nada relevante mudou (fps oscila por ruído de arredondamento
+      // no backend). Comparar antes de recriar o objeto evita acordar toda
+      // a reatividade (grade + preview expandido) sem necessidade — achado
+      // em bancada testando 3 celulares + 1 RTSP simultâneos (2026-08-08),
+      // onde o preview "piscava" sob essa carga.
+      // `fps` é uma EMA (float) que muda por ruído a cada tick — comparar
+      // com o valor arredondado exibido na UI (`toFixed(1)`) em vez do float
+      // cru, senão a comparação nunca bate e o guard vira um no-op.
+      const current = sources[idx];
+      if (
+        current.state === event.state &&
+        current.stats?.fps.toFixed(1) === event.stats.fps.toFixed(1) &&
+        current.stats?.uptime_secs === event.stats.uptime_secs &&
+        current.stats?.reconnects === event.stats.reconnects
+      ) {
+        return;
+      }
+      sources = sources.map((s, i) =>
+        i === idx ? { ...s, state: event.state, stats: event.stats } : s,
+      );
     }).then((fn) => {
       unlistenSessionState = fn;
     });
     // Rotação 90°/270° reinicia a sessão por baixo (T079) — realinha o
-    // session_id sem o usuário perceber.
+    // session_id da fonte sem o usuário perceber.
     onSessionReplaced((event) => {
-      if (event.old_session_id !== sessionId) return;
-      sessionId = event.response.session_id;
-      sessionState = event.response.state;
-      sessionStats = event.response.stats;
+      const idx = sources.findIndex((s) => s.sessionId === event.old_session_id);
+      if (idx === -1) return;
+      const newId = event.response.session_id;
+      sources = sources.map((s, i) =>
+        i === idx
+          ? { ...s, id: newId, sessionId: newId, state: event.response.state, stats: event.response.stats }
+          : s,
+      );
+      if (expandedId === event.old_session_id) expandedId = newId;
     }).then((fn) => {
       unlistenSessionReplaced = fn;
     });
     // US3: modo inteligente corrente — CameraControls usa pra liberar ISO
     // manual só no modo pro; ModeSelector usa pra marcar o modo ativo.
     onControlState((event) => {
-      if (event.session_id !== sessionId) return;
-      controlState = event.control_state;
+      const idx = sources.findIndex((s) => s.sessionId === event.session_id);
+      if (idx === -1) return;
+      sources = sources.map((s, i) =>
+        i === idx ? { ...s, controlState: event.control_state } : s,
+      );
     }).then((fn) => {
       unlistenControlState = fn;
     });
@@ -103,17 +147,28 @@
     unlistenControlState?.();
   });
 
-  function adoptSession(response: StartStreamResponse) {
-    sessionId = response.session_id;
-    sessionState = response.state;
-    sessionStats = response.stats;
-    controlState = null; // sessão nova: modo corrente ainda não é conhecido
+  /** switch_camera / girar 90°-270° reiniciam a sessão → session_id novo. */
+  function adoptSession(oldId: string, response: StartStreamResponse) {
+    const newId = response.session_id;
+    sources = sources.map((s) =>
+      s.id === oldId
+        ? {
+            ...s,
+            id: newId,
+            sessionId: newId,
+            state: response.state,
+            stats: response.stats,
+            controlState: null, // sessão nova: modo corrente ainda não é conhecido
+          }
+        : s,
+    );
+    if (expandedId === oldId) expandedId = newId;
   }
 
   async function handleTapToFocus(x: number, y: number) {
-    if (!sessionId) return;
+    if (!expandedSource || expandedSource.kind !== "android") return;
     try {
-      await setControl(sessionId, { focus: { tap: { x, y } } });
+      await setControl(expandedSource.sessionId, { focus: { tap: { x, y } } });
     } catch (e) {
       applyError(e);
     }
@@ -141,14 +196,32 @@
 
   async function handleStart() {
     if (!selectedDevice) return;
+    if (sources.length >= MAX_CONCURRENT_SOURCES) {
+      applyError({ msg: `Limite de ${MAX_CONCURRENT_SOURCES} fontes simultâneas atingido.` });
+      return;
+    }
+    if (sources.some((s) => s.kind === "android" && s.serial === selectedDevice!.serial)) {
+      applyError({ msg: "Este dispositivo já está transmitindo." });
+      return;
+    }
     errorMsg = null;
     actionHint = null;
     starting = true;
     try {
       const response = await startStream(selectedDevice.serial, buildConfig());
-      sessionId = response.session_id;
-      sessionState = response.state;
-      sessionStats = response.stats;
+      const newSource: ActiveSource = {
+        kind: "android",
+        id: response.session_id,
+        sessionId: response.session_id,
+        name: selectedDevice.model,
+        meta: `adb · USB · ${selectedDevice.serial}`,
+        state: response.state,
+        stats: response.stats,
+        serial: selectedDevice.serial,
+        controlState: null,
+      };
+      sources = [...sources, newSource];
+      expandedId = newSource.id;
     } catch (e) {
       applyError(e);
     } finally {
@@ -156,236 +229,503 @@
     }
   }
 
-  async function handleStop() {
-    if (!sessionId) return;
-    stopping = true;
+  async function handleStopSource(source: ActiveSource) {
     try {
-      await stopStream(sessionId);
+      if (source.kind === "android") {
+        await stopStream(source.sessionId);
+      } else {
+        await stopRtsp(source.id);
+      }
     } catch (e) {
       applyError(e);
-    } finally {
-      sessionId = null;
-      sessionState = null;
-      sessionStats = null;
-      stopping = false;
+      return;
     }
+    sources = sources.filter((s) => s.id !== source.id);
+    if (expandedId === source.id) expandedId = null;
+  }
+
+  function handleRtspStarted(source: RtspSource, response: StartStreamResponse) {
+    const newSource: ActiveSource = {
+      kind: "rtsp",
+      id: source.id,
+      sessionId: response.session_id,
+      name: source.name,
+      meta: source.url,
+      state: response.state,
+      stats: response.stats,
+    };
+    sources = [...sources, newSource];
+    expandedId = newSource.id;
+  }
+
+  function handleRtspStopped(id: string) {
+    sources = sources.filter((s) => s.id !== id);
+    if (expandedId === id) expandedId = null;
   }
 </script>
 
-<main class="page">
-  <h1>CamLink</h1>
-
-  <section>
-    <h2>Dispositivos</h2>
-    <DeviceList
-      selectedSerial={selectedDevice?.serial ?? null}
-      onSelect={(device) => (selectedDevice = device)}
-    />
-  </section>
-
-  <section class="config">
-    <h2>Configuração</h2>
-    <div class="config-grid">
-      <label>
-        Resolução
-        <select bind:value={resolutionIndex} disabled={active}>
-          {#each RESOLUTIONS as res, i (i)}
-            <option value={i}>{res[0]}x{res[1]}</option>
-          {/each}
-        </select>
-      </label>
-
-      <label>
-        FPS
-        <select bind:value={fps} disabled={active}>
-          {#each FPS_OPTIONS as f (f)}
-            <option value={f}>{f}</option>
-          {/each}
-        </select>
-      </label>
-
-      <label>
-        Bitrate (Mbps)
-        <input
-          type="number"
-          min="1"
-          max="50"
-          step="1"
-          bind:value={bitrateMbps}
-          disabled={active}
-        />
-      </label>
-
-      <label>
-        Codec
-        <select bind:value={codec} disabled={active}>
-          <option value="h264">H.264</option>
-          <option value="h265">H.265</option>
-        </select>
-      </label>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <span class="brand-name">CamLink</span>
     </div>
-  </section>
+    <span class="source-count">{sources.length}/{MAX_CONCURRENT_SOURCES} fontes ativas</span>
+  </header>
 
-  <section class="controls">
-    {#if !active}
-      <button type="button" onclick={handleStart} disabled={!selectedDevice || starting}>
-        {starting ? "Iniciando..." : "Iniciar"}
-      </button>
-    {:else}
-      <button type="button" onclick={handleStop} disabled={stopping}>
-        {stopping ? "Parando..." : "Parar"}
-      </button>
-    {/if}
+  <main class="layout">
+    <aside class="sidebar">
+      <div class="tabs">
+        <button
+          type="button"
+          class:active={sourceTab === "android"}
+          onclick={() => (sourceTab = "android")}
+        >
+          Dispositivo Android
+        </button>
+        <button
+          type="button"
+          class:active={sourceTab === "rtsp"}
+          onclick={() => (sourceTab = "rtsp")}
+        >
+          Fontes RTSP
+        </button>
+      </div>
 
-    {#if sessionState}
-      <span class="status">
-        {#if isSessionError(sessionState)}
-          Erro: {sessionState.error}
-        {:else}
-          {sessionState}
-        {/if}
-      </span>
-    {/if}
+      {#if sourceTab === "android"}
+        <div class="card">
+          <DeviceList
+            selectedSerial={selectedDevice?.serial ?? null}
+            onSelect={(device) => (selectedDevice = device)}
+          />
+        </div>
 
-    {#if sessionStats && sessionState && isSessionActive(sessionState)}
-      <span class="stats">
-        {sessionStats.fps.toFixed(1)} fps · {sessionStats.reconnects} reconexões
-      </span>
-    {/if}
-  </section>
+        <div class="card">
+          <h2>Configuração da sessão</h2>
+          <div class="config-grid">
+            <label>
+              Resolução
+              <select bind:value={resolutionIndex} disabled={starting}>
+                {#each RESOLUTIONS as res, i (i)}
+                  <option value={i}>{res[0]}x{res[1]}</option>
+                {/each}
+              </select>
+            </label>
 
-  {#if errorMsg}
-    <div class="error-banner">
-      <p>{errorMsg}</p>
-      {#if actionHint}
-        <p class="hint">{actionHint}</p>
+            <label>
+              FPS alvo
+              <select bind:value={fps} disabled={starting}>
+                {#each FPS_OPTIONS as f (f)}
+                  <option value={f}>{f}</option>
+                {/each}
+              </select>
+            </label>
+
+            <label>
+              Bitrate
+              <select bind:value={bitrateMbps} disabled={starting}>
+                {#each [2, 4, 6, 8, 12, 20, 30, 50] as mb (mb)}
+                  <option value={mb}>{mb} Mbps</option>
+                {/each}
+              </select>
+            </label>
+
+            <label>
+              Codec
+              <select bind:value={codec} disabled={starting}>
+                <option value="h264">H.264</option>
+                <option value="h265">H.265</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <button
+            type="button"
+            class="primary-action"
+            onclick={handleStart}
+            disabled={!selectedDevice || starting || sources.length >= MAX_CONCURRENT_SOURCES}
+          >
+            {starting ? "Iniciando..." : "Iniciar transmissão"}
+          </button>
+          {#if sources.length >= MAX_CONCURRENT_SOURCES}
+            <p class="hint">Limite de {MAX_CONCURRENT_SOURCES} fontes simultâneas atingido.</p>
+          {/if}
+        </div>
+      {:else}
+        <div class="card">
+          <RtspPanel
+            activeIds={rtspActiveIds}
+            onError={applyError}
+            onStarted={handleRtspStarted}
+            onStopped={handleRtspStopped}
+          />
+        </div>
       {/if}
-    </div>
-  {/if}
+    </aside>
 
-  {#if active && sessionId && selectedDevice}
-    <section>
-      <h2>Modo</h2>
-      <ModeSelector
-        {sessionId}
-        serial={selectedDevice.serial}
-        mode={controlState?.mode ?? "auto"}
-        onError={applyError}
-      />
+    <section class="main-col">
+      {#if errorMsg}
+        <div class="error-banner">
+          <p>{errorMsg}</p>
+          {#if actionHint}
+            <p class="hint">{actionHint}</p>
+          {/if}
+        </div>
+      {/if}
+
+      <div class="card">
+        <h2>Fontes ativas</h2>
+        {#if sources.length === 0}
+          <p class="empty">
+            Nenhuma fonte ativa. Selecione um dispositivo Android ou uma câmera
+            RTSP na barra lateral e inicie a transmissão.
+          </p>
+        {/if}
+        <SourceGrid {sources} {expandedId} onSelect={(id) => (expandedId = id)} onStop={handleStopSource} />
+      </div>
+
+      {#if expandedSource}
+        <div class="card expanded-card">
+          <div class="expanded-header">
+            <button type="button" class="back-link" onclick={() => (expandedId = null)}>
+              ‹ Voltar à grade
+            </button>
+            <span class="expanded-name">{expandedSource.name}</span>
+            {#if isSessionError(expandedSource.state)}
+              <span class="expanded-status error">Erro: {expandedSource.state.error}</span>
+            {:else}
+              <span class="expanded-status">{expandedSource.state}</span>
+            {/if}
+          </div>
+
+          <div class="preview-card">
+            <div class="card-header">
+              <span class="rec-dot small"></span>
+              <h2>Preview ao vivo</h2>
+              <span class="header-hint">Toque na imagem para focar</span>
+            </div>
+            <Preview
+              sessionId={expandedSource.sessionId}
+              onTap={expandedSource.kind === "android" ? handleTapToFocus : undefined}
+            />
+          </div>
+
+          {#if expandedSource.kind === "android" && expandedSource.serial}
+            <div class="subcard">
+              <h2>Modo</h2>
+              <ModeSelector
+                sessionId={expandedSource.sessionId}
+                serial={expandedSource.serial}
+                mode={expandedSource.controlState?.mode ?? "auto"}
+                onError={applyError}
+              />
+            </div>
+
+            <div class="subcard">
+              <h2>Controles da câmera</h2>
+              <CameraControls
+                sessionId={expandedSource.sessionId}
+                serial={expandedSource.serial}
+                mode={expandedSource.controlState?.mode ?? "auto"}
+                onSessionChanged={(response) => adoptSession(expandedSource!.id, response)}
+                onError={applyError}
+              />
+            </div>
+
+            <div class="subcard">
+              <h2>Captura RAW</h2>
+              <RawPanel
+                sessionId={expandedSource.sessionId}
+                serial={expandedSource.serial}
+                onError={applyError}
+              />
+            </div>
+          {/if}
+        </div>
+      {/if}
     </section>
-
-    <section>
-      <h2>Controles da câmera</h2>
-      <CameraControls
-        {sessionId}
-        serial={selectedDevice.serial}
-        mode={controlState?.mode ?? "auto"}
-        onSessionChanged={adoptSession}
-        onError={applyError}
-      />
-    </section>
-  {/if}
-
-  <section>
-    <h2>Preview</h2>
-    <Preview
-      sessionId={active ? sessionId : rtspSessionId}
-      onTap={active ? handleTapToFocus : undefined}
-    />
-  </section>
-
-  <section>
-    <h2>Câmeras IP (RTSP)</h2>
-    <RtspPanel
-      onError={applyError}
-      onStarted={(_id, response) => (rtspSessionId = response.session_id)}
-    />
-  </section>
-</main>
+  </main>
+</div>
 
 <style>
   :root {
     font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-    color: #0f0f0f;
-    background-color: #f6f6f6;
+    color: #14151a;
+    background-color: #f6f6f4;
+    --accent: #6d5cf5;
+    --accent-hover: #5b4ae0;
+    --card-bg: #ffffff;
+    --card-border: rgba(20, 21, 26, 0.1);
+    --muted: rgba(20, 21, 26, 0.6);
   }
 
   @media (prefers-color-scheme: dark) {
     :root {
-      color: #f6f6f6;
-      background-color: #2f2f2f;
+      color: #f0f0f2;
+      background-color: #202127;
+      --card-bg: #2a2b33;
+      --card-border: rgba(255, 255, 255, 0.08);
+      --muted: rgba(240, 240, 242, 0.6);
     }
   }
 
-  .page {
-    max-width: 640px;
-    margin: 0 auto;
-    padding: 1.5rem;
+  .app {
+    min-height: 100vh;
     display: flex;
     flex-direction: column;
-    gap: 1.5rem;
   }
 
-  h1 {
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--card-border);
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 700;
+    font-size: 1.1rem;
+  }
+
+  .brand-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  .source-count {
+    margin-left: auto;
+    font-size: 0.8em;
+    font-weight: 600;
+    color: var(--muted);
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 999px;
+    padding: 0.35rem 0.8rem;
+  }
+
+  .layout {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 380px 1fr;
+    gap: 1.5rem;
+    padding: 1.5rem;
+    max-width: 1600px;
+    width: 100%;
+    margin: 0 auto;
+    align-items: start;
+  }
+
+  @media (max-width: 900px) {
+    .layout {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .sidebar,
+  .main-col {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 0.4rem;
+    padding: 0.3rem;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+  }
+
+  .tabs button {
+    flex: 1;
+    padding: 0.5rem 0.75rem;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.85em;
+  }
+
+  .tabs button.active {
+    background: var(--accent);
+    color: white;
+  }
+
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 1.1rem;
+  }
+
+  .subcard {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 1.1rem;
+  }
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .card-header h2 {
     margin: 0;
   }
 
+  .header-hint {
+    margin-left: auto;
+    font-size: 0.8em;
+    color: var(--muted);
+  }
+
   h2 {
-    font-size: 1rem;
-    margin: 0 0 0.5rem;
-    opacity: 0.8;
+    font-size: 0.95rem;
+    margin: 0 0 0.75rem;
+  }
+
+  .empty {
+    font-size: 0.85em;
+    color: var(--muted);
+    margin: 0 0 0.75rem;
   }
 
   .config-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    grid-template-columns: repeat(2, 1fr);
     gap: 0.75rem;
   }
 
   label {
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
+    gap: 0.3rem;
     font-size: 0.85em;
+    color: var(--muted);
   }
 
-  .controls {
+  select {
+    padding: 0.45rem 0.6rem;
+    border-radius: 8px;
+    border: 1px solid var(--card-border);
+    background: transparent;
+    color: inherit;
+    font-size: 0.9em;
+  }
+
+  .hint {
+    font-size: 0.8em;
+    color: var(--muted);
+    margin: 0.6rem 0 0;
+  }
+
+  .primary-action {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    flex-wrap: wrap;
-  }
-
-  button {
-    padding: 0.5rem 1.2rem;
-    border-radius: 6px;
+    justify-content: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.7rem 1rem;
+    border-radius: 10px;
     border: none;
-    background: #4a8cff;
+    background: var(--accent);
     color: white;
     cursor: pointer;
     font-weight: 600;
   }
 
-  button:disabled {
+  .primary-action:hover:not(:disabled) {
+    background: var(--accent-hover);
+  }
+
+  .primary-action:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
 
-  .status {
-    font-size: 0.85em;
-    text-transform: capitalize;
-    opacity: 0.8;
+  .rec-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: white;
+    animation: pulse 1.4s ease-in-out infinite;
   }
 
-  .stats {
+  .rec-dot.small {
+    background: #dc2626;
+  }
+
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.4;
+    }
+  }
+
+  .preview-card :global(.preview) {
+    max-width: none;
+  }
+
+  .expanded-card {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    border-color: var(--accent);
+  }
+
+  .expanded-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .back-link {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-weight: 600;
     font-size: 0.8em;
-    opacity: 0.6;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .expanded-name {
+    font-weight: 700;
+    font-size: 1rem;
+  }
+
+  .expanded-status {
+    margin-left: auto;
+    font-size: 0.8em;
+    color: var(--muted);
+    text-transform: capitalize;
+  }
+
+  .expanded-status.error {
+    color: #dc2626;
   }
 
   .error-banner {
     background: rgba(220, 38, 38, 0.1);
     border: 1px solid rgba(220, 38, 38, 0.3);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 0.6rem 0.8rem;
     color: #b91c1c;
   }
@@ -393,6 +733,7 @@
   .error-banner .hint {
     margin: 0.3rem 0 0;
     opacity: 0.85;
+    color: inherit;
   }
 
   .error-banner p {

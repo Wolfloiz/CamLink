@@ -12,16 +12,23 @@
   import type { RtspSource, StartStreamResponse } from "./types";
 
   let {
+    activeIds,
     onError,
     onStarted,
+    onStopped,
   }: {
+    /** IDs das fontes RTSP ativas AGORA (fonte única de verdade: `sources`
+     * em +page.svelte) — evita este painel ter seu próprio estado de
+     * "rodando" que poderia dessincronizar do card na grade. */
+    activeIds: string[];
     onError: (e: unknown) => void;
-    /** Sessão RTSP ativa (preview usa o session_id). */
-    onStarted: (id: string, response: StartStreamResponse) => void;
+    /** Fonte iniciada (grade em +page.svelte adiciona um card). */
+    onStarted: (source: RtspSource, response: StartStreamResponse) => void;
+    /** Fonte parada por aqui (grade em +page.svelte remove o card). */
+    onStopped: (id: string) => void;
   } = $props();
 
   let sources = $state<RtspSource[]>([]);
-  let running = $state<Record<string, boolean>>({});
   let busy = $state(false);
 
   let name = $state("");
@@ -61,8 +68,7 @@
     busy = true;
     try {
       const response = await startRtsp(source.id);
-      running = { ...running, [source.id]: true };
-      onStarted(source.id, response);
+      onStarted(source, response);
     } catch (e) {
       onError(e);
     } finally {
@@ -74,7 +80,7 @@
     busy = true;
     try {
       await stopRtsp(source.id);
-      running = { ...running, [source.id]: false };
+      onStopped(source.id);
     } catch (e) {
       onError(e);
     } finally {
@@ -86,7 +92,6 @@
     busy = true;
     try {
       await removeRtspSource(source.id);
-      running = { ...running, [source.id]: false };
       await refresh();
     } catch (e) {
       onError(e);
@@ -117,17 +122,23 @@
     <ul class="sources">
       {#each sources as source (source.id)}
         <li>
-          <div class="info">
-            <strong>{source.name}</strong>
-            <span class="url">{source.url}</span>
-            {#if source.secret_ref}
-              <span class="lock" title="Credencial guardada no cofre do sistema"
-                >🔒</span
-              >
-            {/if}
+          <div class="row-top">
+            <div class="info">
+              <strong>{source.name}</strong>
+              {#if source.secret_ref}
+                <span class="lock" title="Credencial guardada no cofre do sistema"
+                  >🔒</span
+                >
+              {/if}
+            </div>
+            <span class="badge" class:active={activeIds.includes(source.id)}>
+              <span class="dot"></span>
+              {activeIds.includes(source.id) ? "Ativa" : "Parada"}
+            </span>
           </div>
+          <span class="url">{source.url}</span>
           <div class="actions">
-            {#if running[source.id]}
+            {#if activeIds.includes(source.id)}
               <button
                 type="button"
                 disabled={busy}
@@ -147,8 +158,8 @@
             <button
               type="button"
               class="danger"
-              disabled={busy || running[source.id]}
-              title={running[source.id]
+              disabled={busy || activeIds.includes(source.id)}
+              title={activeIds.includes(source.id)
                 ? "Pare a fonte antes de remover"
                 : "Remove a fonte e o segredo do cofre"}
               onclick={() => handleRemove(source)}
@@ -171,7 +182,7 @@
 
   .add-form {
     display: grid;
-    grid-template-columns: 1fr 1.5fr 1fr auto;
+    grid-template-columns: 1fr;
     gap: 0.5rem;
   }
 
@@ -188,7 +199,7 @@
     padding: 0.4rem 0.9rem;
     border-radius: 6px;
     border: none;
-    background: #4a8cff;
+    background: #6d5cf5;
     color: white;
     cursor: pointer;
     font-weight: 600;
@@ -217,19 +228,50 @@
 
   .sources li {
     display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid rgba(120, 120, 120, 0.25);
+    border-radius: 10px;
+  }
+
+  .row-top {
+    display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.75rem;
-    padding: 0.5rem 0.75rem;
-    border: 1px solid rgba(120, 120, 120, 0.25);
-    border-radius: 8px;
+    gap: 0.5rem;
   }
 
   .info {
     display: flex;
     align-items: baseline;
-    gap: 0.5rem;
+    gap: 0.4rem;
     min-width: 0;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.72em;
+    font-weight: 600;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    flex-shrink: 0;
+    background: rgba(107, 114, 128, 0.15);
+    color: #6b7280;
+  }
+
+  .badge .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  .badge.active {
+    background: rgba(34, 197, 94, 0.15);
+    color: #15803d;
   }
 
   .url {
@@ -264,11 +306,5 @@
   .actions button:disabled {
     opacity: 0.4;
     cursor: not-allowed;
-  }
-
-  @media (max-width: 640px) {
-    .add-form {
-      grid-template-columns: 1fr;
-    }
   }
 </style>

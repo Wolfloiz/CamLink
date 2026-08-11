@@ -14,7 +14,98 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::model::{VirtualCamera, VirtualCameraState};
+use crate::error::AppError;
+use crate::model::{AndroidDevice, VirtualCamera, VirtualCameraState};
+
+/// Limite prático de fontes simultâneas da v1 (spec.md, notas; FR-021;
+/// plan.md "Scale/Scope").
+pub const MAX_CONCURRENT_SOURCES: usize = 4;
+
+/// Gate de capacidade chamado por `start_stream`/`start_rtsp` (lib.rs) antes
+/// de criar qualquer recurso (vcam/processo) para a nova fonte — nunca deixa
+/// uma 5ª fonte nascer parcialmente alocada.
+pub fn check_capacity(active: usize) -> Result<(), AppError> {
+    if active >= MAX_CONCURRENT_SOURCES {
+        Err(AppError::new(
+            "max_sources_reached",
+            format!("Limite de {MAX_CONCURRENT_SOURCES} fontes simultâneas atingido"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Comprimento máximo seguro de um label de device virtual (T065c): o
+/// `card_label` do v4l2loopback é um `char[32]` do lado do kernel (31 chars
+/// úteis + terminador), e o filtro DirectShow tem uma restrição do mesmo
+/// tipo. Sem cortar aqui, um nome digitado livremente (fonte RTSP) ou um
+/// discriminador longo (modelo Android + sufixo) falha ou trunca de forma
+/// feia no OBS em vez de na origem.
+pub const MAX_LABEL_LEN: usize = 31;
+
+/// Normaliza texto pra virar (parte de) um label de device: colapsa
+/// sequências de espaço em um só, tira espaço nas pontas e corta em
+/// `max_len` caracteres — por `char`, nunca por byte, então não quebra
+/// UTF-8 ao meio.
+pub fn sanitize_label(raw: &str, max_len: usize) -> String {
+    raw.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max_len)
+        .collect()
+}
+
+/// Label por-fonte usado na criação do device virtual: cada fonte
+/// concorrente (serial do Android, id da fonte RTSP) precisa de um label
+/// distinto, senão `find_reusable_device` (v4l2.rs) reaproveita/rouba o
+/// device de uma sessão irmã ainda viva. O reuso continua estável ENTRE
+/// restarts da MESMA fonte lógica porque o discriminador (serial/id) não
+/// muda entre chamadas para a mesma fonte. Sempre sanitizado/cortado em
+/// `MAX_LABEL_LEN` (T065c) — discriminadores digitados livremente (nome de
+/// fonte RTSP) não podem estourar o limite do device virtual.
+pub fn vcam_label(base: &str, discriminator: &str) -> String {
+    sanitize_label(&format!("{base} ({discriminator})"), MAX_LABEL_LEN)
+}
+
+/// Discriminador amigável de fonte Android (T065c): usa o modelo do
+/// aparelho (`AndroidDevice.model`, cacheado em `AppState.devices` desde a
+/// última descoberta via `adb devices -l`) em vez do serial cru, com um
+/// sufixo do próprio serial pra continuar único mesmo com 2 aparelhos do
+/// MESMO modelo plugados ao mesmo tempo (ex.: `"SM-N970F (2ABC)"`). Se o
+/// device ainda não estiver na lista cacheada (corrida rara entre
+/// descoberta e start) ou o modelo vier vazio, cai pro serial puro — nunca
+/// falha, só fica menos amigável.
+pub fn android_label_discriminator(devices: &[AndroidDevice], serial: &str) -> String {
+    match devices.iter().find(|d| d.serial == serial) {
+        Some(d) if !d.model.trim().is_empty() => {
+            let chars: Vec<char> = serial.chars().collect();
+            let start = chars.len().saturating_sub(4);
+            let suffix: String = chars[start..].iter().collect();
+            format!("{} ({suffix})", d.model.trim())
+        }
+        _ => serial.to_string(),
+    }
+}
+
+/// Discriminador amigável de fonte RTSP (T065c): usa o nome que o próprio
+/// usuário deu à fonte (`RtspSource.name`, ex. "Câmera do portão") em vez
+/// do `Uuid` cru. Sempre leva um sufixo curto do `id` — mesmo que o nome
+/// seja único hoje, nada impede o usuário de cadastrar duas fontes com o
+/// mesmo nome, e o discriminador também é a chave de unicidade do device
+/// virtual (`find_reusable_device`); sem o sufixo, a 2ª fonte roubaria o
+/// device da 1ª (o mesmo bug corrigido no T062 pra Android). Nome vazio
+/// (não deveria acontecer — `RtspPanel.svelte` exige preenchido — mas sem
+/// custo cobrir) cai pro `id` puro.
+pub fn rtsp_label_discriminator(name: &str, id: &Uuid) -> String {
+    let name = name.trim();
+    let suffix: String = id.simple().to_string().chars().take(4).collect();
+    if name.is_empty() {
+        id.to_string()
+    } else {
+        format!("{name} #{suffix}")
+    }
+}
 
 /// Falha do backend de câmera virtual.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -226,5 +317,139 @@ impl VirtualCameraBackend for MockBackend {
 
     fn cameras(&self) -> Vec<&VirtualCamera> {
         self.cameras.values().map(|c| &c.camera).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::AuthState;
+
+    fn device(serial: &str, model: &str) -> AndroidDevice {
+        AndroidDevice {
+            serial: serial.to_string(),
+            model: model.to_string(),
+            auth_state: AuthState::Authorized,
+            compatible: true,
+            incompat_reason: None,
+            capabilities: None,
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // sanitize_label
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn sanitize_label_trims_and_collapses_internal_whitespace() {
+        assert_eq!(
+            sanitize_label("  Câmera   do   portão  ", 31),
+            "Câmera do portão"
+        );
+    }
+
+    #[test]
+    fn sanitize_label_truncates_by_char_not_byte() {
+        // "ã" ocupa 2 bytes em UTF-8 — cortar por byte quebraria o char.
+        let raw = "ãããããããããã"; // 12 chars
+        let sanitized = sanitize_label(raw, 5);
+        assert_eq!(sanitized.chars().count(), 5);
+        assert_eq!(sanitized, "ããããã");
+    }
+
+    #[test]
+    fn sanitize_label_leaves_short_text_untouched() {
+        assert_eq!(sanitize_label("Câmera do portão", 31), "Câmera do portão");
+    }
+
+    // -----------------------------------------------------------------
+    // vcam_label — nunca estoura MAX_LABEL_LEN (T065c), mesmo com um
+    // discriminador digitado livremente (nome de fonte RTSP).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn vcam_label_never_exceeds_max_label_len() {
+        let long_name = "Câmera de segurança da entrada principal do galpão 2";
+        let label = vcam_label("CamLink IP", long_name);
+        assert!(label.chars().count() <= MAX_LABEL_LEN);
+    }
+
+    #[test]
+    fn vcam_label_short_inputs_unaffected_by_truncation() {
+        assert_eq!(
+            vcam_label("CamLink Android", "R58M12ABCDE"),
+            "CamLink Android (R58M12ABCDE)"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // android_label_discriminator
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn android_label_discriminator_uses_model_and_serial_suffix() {
+        let devices = vec![device("R58M12ABCDE", "SM-N970F")];
+        assert_eq!(
+            android_label_discriminator(&devices, "R58M12ABCDE"),
+            "SM-N970F (BCDE)"
+        );
+    }
+
+    #[test]
+    fn android_label_discriminator_disambiguates_same_model_different_devices() {
+        let devices = vec![
+            device("R58M12ABCDE", "SM-N970F"),
+            device("HT2ABC091234", "SM-N970F"),
+        ];
+        let a = android_label_discriminator(&devices, "R58M12ABCDE");
+        let b = android_label_discriminator(&devices, "HT2ABC091234");
+        assert_ne!(a, b);
+        assert!(a.starts_with("SM-N970F ("));
+        assert!(b.starts_with("SM-N970F ("));
+    }
+
+    #[test]
+    fn android_label_discriminator_falls_back_to_serial_when_device_unknown() {
+        let devices: Vec<AndroidDevice> = vec![];
+        assert_eq!(
+            android_label_discriminator(&devices, "R58M12ABCDE"),
+            "R58M12ABCDE"
+        );
+    }
+
+    #[test]
+    fn android_label_discriminator_falls_back_to_serial_when_model_is_blank() {
+        let devices = vec![device("R58M12ABCDE", "  ")];
+        assert_eq!(
+            android_label_discriminator(&devices, "R58M12ABCDE"),
+            "R58M12ABCDE"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // rtsp_label_discriminator
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn rtsp_label_discriminator_uses_the_user_given_name() {
+        let id = Uuid::new_v4();
+        let discriminator = rtsp_label_discriminator("Câmera do portão", &id);
+        assert!(discriminator.starts_with("Câmera do portão #"));
+    }
+
+    #[test]
+    fn rtsp_label_discriminator_disambiguates_sources_with_the_same_name() {
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+        assert_ne!(
+            rtsp_label_discriminator("Câmera", &id_a),
+            rtsp_label_discriminator("Câmera", &id_b)
+        );
+    }
+
+    #[test]
+    fn rtsp_label_discriminator_falls_back_to_id_when_name_is_blank() {
+        let id = Uuid::new_v4();
+        assert_eq!(rtsp_label_discriminator("   ", &id), id.to_string());
     }
 }

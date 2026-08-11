@@ -24,6 +24,7 @@ use camlink_lib::virtualcam::v4l2::{
     build_add_args, ctl_supports_dynamic_add, detect_secure_boot_block, find_reusable_device,
     parse_added_device, parse_ctl_version, parse_list_output, LoopbackDevice,
 };
+use camlink_lib::virtualcam::vcam_label;
 
 // ---------------------------------------------------------------------------
 // parse_added_device — saída de `v4l2loopback-ctl add -n <label> -x 1`
@@ -138,6 +139,60 @@ fn no_device_with_matching_label_yields_none() {
 fn label_match_is_exact_not_prefix() {
     let devices = vec![dev("/dev/video2", "CamLink Android (old)")];
     assert_eq!(find_reusable_device(&devices, "CamLink Android"), None);
+}
+
+// ---------------------------------------------------------------------------
+// vcam_label — discrimina fontes concorrentes (T062/US6): duas sessões
+// diferentes (dois celulares, ou celular + RTSP) nunca podem colidir no
+// mesmo label, senão `find_reusable_device` rouba o device uma da outra.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vcam_label_embeds_the_discriminator() {
+    assert_eq!(
+        vcam_label("CamLink Android", "R58M12ABCDE"),
+        "CamLink Android (R58M12ABCDE)"
+    );
+}
+
+#[test]
+fn vcam_label_is_stable_for_the_same_discriminator() {
+    // Restarts da MESMA fonte lógica (switch_camera, rotação) precisam
+    // continuar reaproveitando o mesmo device — por isso o label não pode
+    // variar entre chamadas com o mesmo discriminador.
+    assert_eq!(
+        vcam_label("CamLink Android", "R58M12ABCDE"),
+        vcam_label("CamLink Android", "R58M12ABCDE")
+    );
+}
+
+#[test]
+fn vcam_label_differs_across_discriminators() {
+    assert_ne!(
+        vcam_label("CamLink Android", "R58M12ABCDE"),
+        vcam_label("CamLink Android", "HT2ABC091234")
+    );
+}
+
+#[test]
+fn find_reusable_device_picks_the_device_matching_the_discriminated_label() {
+    let devices = vec![
+        dev("/dev/video3", &vcam_label("CamLink Android", "PHONE-A")),
+        dev("/dev/video7", &vcam_label("CamLink Android", "PHONE-B")),
+    ];
+    assert_eq!(
+        find_reusable_device(&devices, &vcam_label("CamLink Android", "PHONE-A")),
+        Some("/dev/video3".to_string())
+    );
+    assert_eq!(
+        find_reusable_device(&devices, &vcam_label("CamLink Android", "PHONE-B")),
+        Some("/dev/video7".to_string())
+    );
+    // Um terceiro celular concorrente não deve "roubar" nem A nem B.
+    assert_eq!(
+        find_reusable_device(&devices, &vcam_label("CamLink Android", "PHONE-C")),
+        None
+    );
 }
 
 // ---------------------------------------------------------------------------

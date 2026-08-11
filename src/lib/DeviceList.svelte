@@ -102,15 +102,20 @@
         >
           <span class="model">{device.model}</span>
           <span class="serial">{device.serial}</span>
-          <span class="badge badge-{device.auth_state}">
-            {#if device.auth_state === "authorized"}
-              Autorizado
-            {:else if device.auth_state === "unauthorized"}
-              Não autorizado
-            {:else}
-              Offline
-            {/if}
-          </span>
+          {#if !device.compatible}
+            <span class="badge badge-incompatible"><span class="dot"></span>Incompatível</span>
+          {:else}
+            <span class="badge badge-{device.auth_state}">
+              <span class="dot"></span>
+              {#if device.auth_state === "authorized"}
+                Autorizado
+              {:else if device.auth_state === "unauthorized"}
+                Não autorizado
+              {:else}
+                Offline
+              {/if}
+            </span>
+          {/if}
         </button>
 
         {#if device.auth_state === "unauthorized"}
@@ -151,16 +156,18 @@
 
   .device {
     border: 1px solid var(--border-color, #ccc);
-    border-radius: 8px;
+    border-radius: 10px;
     overflow: hidden;
+    transition: border-color 0.15s ease, background 0.15s ease;
   }
 
   .device.selected {
-    border-color: #4a8cff;
+    border-color: #6d5cf5;
+    background: rgba(109, 92, 245, 0.08);
   }
 
   .device.disabled {
-    opacity: 0.7;
+    opacity: 0.6;
   }
 
   .device-row {
@@ -192,25 +199,42 @@
   }
 
   .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
     font-size: 0.75em;
-    padding: 0.15rem 0.5rem;
+    font-weight: 600;
+    padding: 0.2rem 0.6rem;
     border-radius: 999px;
     white-space: nowrap;
   }
 
+  .badge .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+  }
+
   .badge-authorized {
-    background: #1f9d55;
-    color: white;
+    background: rgba(34, 197, 94, 0.15);
+    color: #15803d;
   }
 
   .badge-unauthorized {
-    background: #d97706;
-    color: white;
+    background: rgba(217, 119, 6, 0.15);
+    color: #b45309;
   }
 
   .badge-offline {
-    background: #6b7280;
-    color: white;
+    background: rgba(107, 114, 128, 0.15);
+    color: #4b5563;
+  }
+
+  .badge-incompatible {
+    background: rgba(107, 114, 128, 0.15);
+    color: #6b7280;
   }
 
   .guide,

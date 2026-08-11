@@ -198,21 +198,33 @@ pub fn capture_orientation_value(rotation: Rotation, mirror: bool) -> Option<Str
 /// Argumentos do cliente `scrcpy` stock (Linux): captura a câmera do
 /// Android e escreve direto no device v4l2loopback já criado por
 /// `virtualcam::v4l2` (research.md R3).
-pub fn build_scrcpy_client_args(config: &StreamConfig, v4l2_device: &str) -> Vec<String> {
-    build_scrcpy_client_args_oriented(config, v4l2_device, Rotation::Deg0, false)
+pub fn build_scrcpy_client_args(
+    config: &StreamConfig,
+    v4l2_device: &str,
+    serial: &str,
+) -> Vec<String> {
+    build_scrcpy_client_args_oriented(config, v4l2_device, Rotation::Deg0, false, serial)
 }
 
 /// Variante com orientação (FR-016a): no Linux girar/espelhar é aplicado
 /// pelo próprio scrcpy (`--capture-orientation`, GPU do celular) — os frames
 /// não passam pelo CamLink (vão direto ao v4l2loopback), então a mudança
 /// exige restart do cliente (device v4l2 persiste; consumidores seguem).
+///
+/// `serial` é obrigatório mesmo com um único device plugado: com 2+
+/// aparelhos Android conectados ao mesmo tempo (US6), o `scrcpy` recusa
+/// escolher sozinho ("Multiple ADB devices ... Select a device via -s") e a
+/// sessão entra num loop infinito de reconexão — achado em bancada
+/// 2026-08-08 testando 3 celulares simultâneos (T065).
 pub fn build_scrcpy_client_args_oriented(
     config: &StreamConfig,
     v4l2_device: &str,
     rotation: Rotation,
     mirror: bool,
+    serial: &str,
 ) -> Vec<String> {
     let mut args = vec![
+        format!("--serial={serial}"),
         "--video-source=camera".to_string(),
         format!("--camera-id={}", config.camera_id),
         format!(
@@ -400,6 +412,7 @@ async fn spawn_backend(
     virtual_camera_target: &str,
     session_id: Uuid,
     orientation: (Rotation, bool),
+    serial: &str,
 ) -> Result<(Child, Option<u16>), AppError> {
     #[cfg(target_os = "linux")]
     {
@@ -416,7 +429,14 @@ async fn spawn_backend(
         // qualquer scrcpy-server pré-existente aqui é seguro). Best-effort:
         // sem processo pra matar (`pkill` sem match) é o caso comum, não erro.
         let _ = crate::procutil::hide_console(Command::new(&paths.adb))
-            .args(["shell", "pkill", "-f", "com.genymobile.scrcpy.Server"])
+            .args([
+                "-s",
+                serial,
+                "shell",
+                "pkill",
+                "-f",
+                "com.genymobile.scrcpy.Server",
+            ])
             .envs(paths.extra_env.iter().cloned())
             .output()
             .await;
@@ -432,7 +452,14 @@ async fn spawn_backend(
         // sozinho (`pgrep` sem match é o caso comum).
         for _ in 0..10 {
             let still_alive = crate::procutil::hide_console(Command::new(&paths.adb))
-                .args(["shell", "pgrep", "-f", "com.genymobile.scrcpy.Server"])
+                .args([
+                    "-s",
+                    serial,
+                    "shell",
+                    "pgrep",
+                    "-f",
+                    "com.genymobile.scrcpy.Server",
+                ])
                 .envs(paths.extra_env.iter().cloned())
                 .output()
                 .await
@@ -448,6 +475,7 @@ async fn spawn_backend(
             virtual_camera_target,
             orientation.0,
             orientation.1,
+            serial,
         );
         let mut child = Command::new(&paths.scrcpy)
             .args(&args)
@@ -478,7 +506,7 @@ async fn spawn_backend(
         // sink, ver lib.rs) — o servidor roda sem transform pra permitir
         // mirror/180° ao vivo, sem restart (FR-016a/SC-004).
         let _ = (virtual_camera_target, orientation);
-        bootstrap_windows_server(paths, config, session_id).await
+        bootstrap_windows_server(paths, config, session_id, serial).await
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
@@ -488,6 +516,7 @@ async fn spawn_backend(
             virtual_camera_target,
             session_id,
             orientation,
+            serial,
         );
         Err(AppError::new(
             "unsupported_platform",
@@ -501,9 +530,10 @@ async fn bootstrap_windows_server(
     paths: &ExternalPaths,
     config: &StreamConfig,
     session_id: Uuid,
+    serial: &str,
 ) -> Result<(Child, Option<u16>), AppError> {
     let push_status = crate::procutil::hide_console(Command::new(&paths.adb))
-        .arg("push")
+        .args(["-s", serial, "push"])
         .arg(&paths.server_jar)
         .arg(SCRCPY_DEVICE_SERVER_PATH)
         .envs(paths.extra_env.iter().cloned())
@@ -518,6 +548,8 @@ async fn bootstrap_windows_server(
     let scid = scid_from_session(session_id);
     let forward_output = crate::procutil::hide_console(Command::new(&paths.adb))
         .args([
+            "-s",
+            serial,
             "forward",
             "tcp:0",
             &format!("localabstract:scrcpy_{scid:08x}"),
@@ -540,6 +572,7 @@ async fn bootstrap_windows_server(
 
     let args = build_server_launch_args(scid, config);
     let mut child = crate::procutil::hide_console(Command::new(&paths.adb))
+        .args(["-s", serial])
         .args(&args)
         .envs(paths.extra_env.iter().cloned())
         .stdout(Stdio::piped())
@@ -1149,6 +1182,14 @@ impl StreamManager {
         orientation: (Rotation, bool),
     ) -> Result<Uuid, AppError> {
         let session_id = Uuid::new_v4();
+        // `StreamManager` só orquestra fontes Android (RTSP passa por
+        // `rtsp_manager::start_session`, sem depender de `adb`/`scrcpy`) —
+        // o serial identifica o device pro `adb -s`/`--serial` do scrcpy
+        // quando 2+ aparelhos estão plugados ao mesmo tempo (US6/T065).
+        let serial = match &source {
+            SessionSource::Android(serial) => serial.clone(),
+            SessionSource::Rtsp(id) => id.to_string(),
+        };
         let mut session = StreamSession {
             source,
             virtual_camera: Uuid::new_v4(),
@@ -1170,6 +1211,7 @@ impl StreamManager {
             virtual_camera_target,
             session_id,
             orientation,
+            &serial,
         )
         .await?;
         maybe_spawn_video_pipeline(
@@ -1202,6 +1244,7 @@ impl StreamManager {
             video_sink,
             control,
             orientation,
+            serial,
         );
         Ok(session_id)
     }
@@ -1285,6 +1328,7 @@ impl StreamManager {
         sessions.get(&session_id).map(|r| r.session.clone())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_monitor(
         &self,
         session_id: Uuid,
@@ -1293,6 +1337,7 @@ impl StreamManager {
         video_sink: Option<FrameSink>,
         control: Arc<SessionControl>,
         orientation: (Rotation, bool),
+        serial: String,
     ) {
         let sessions = Arc::clone(&self.sessions);
         let paths = self.paths.clone();
@@ -1306,6 +1351,7 @@ impl StreamManager {
                 video_sink,
                 control,
                 orientation,
+                serial,
             )
             .await;
         });
@@ -1410,6 +1456,7 @@ async fn monitor_session(
     video_sink: Option<FrameSink>,
     control: Arc<SessionControl>,
     orientation: (Rotation, bool),
+    serial: String,
 ) {
     // Corpo num bloco async para que todos os `return` (stop, erro fatal,
     // retry esgotado) desemboquem num único ponto de limpeza do pipeline.
@@ -1504,6 +1551,7 @@ async fn monitor_session(
                         &virtual_camera_target,
                         session_id,
                         orientation,
+                        &serial,
                     )
                     .await
                     {
