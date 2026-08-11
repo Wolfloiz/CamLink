@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "raw_sequence_start" },
+  "response": { "ok": false, "error": { "code": "BAD_REQUEST", "msg": "campo obrigatório ausente: fps" } }
+}

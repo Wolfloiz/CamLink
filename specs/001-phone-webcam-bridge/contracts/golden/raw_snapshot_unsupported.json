@@ -1,0 +1,5 @@
+{
+  "capabilities": "minimal",
+  "request": { "cmd": "raw_snapshot" },
+  "response": { "ok": false, "error": { "code": "UNSUPPORTED", "msg": "captura RAW não suportada neste aparelho" } }
+}

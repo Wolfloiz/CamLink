@@ -192,16 +192,16 @@ do fork, Java), `installer/{linux,windows}/`.
 
 ### Tests for User Story 5 (REQUIRED) ⚠️
 
-- [ ] T055 [P] [US5] Testes do receptor de framing binário (tag 0xD1, metadata + length-prefix, frames parciais/corrompidos, gravação com timestamp) em `src-tauri/tests/raw_framing_test.rs`
-- [ ] T056 [P] [US5] Teste do cálculo de cadência dinâmica (frame_bytes × throughput medido → fps 1–3, prioridade do stream — FR-020) em `src-tauri/tests/raw_pacing_test.rs`
+- [x] T055 [P] [US5] Testes do receptor de framing binário (tag 0xD1, metadata + length-prefix, frames parciais/corrompidos, gravação com timestamp) em `src-tauri/tests/raw_framing_test.rs` — implementado junto o parser puro (`parse_frame`/`encode_frame`/`write_frame`) em `raw_manager.rs` (frame completo, streaming byte-a-byte, tag/metadata corrompidos, nome de arquivo por seq+timestamp)
+- [x] T056 [P] [US5] Teste do cálculo de cadência dinâmica (frame_bytes × throughput medido → fps 1–3, prioridade do stream — FR-020) em `src-tauri/tests/raw_pacing_test.rs` — `throughput_for_raw`/`effective_raw_fps`/`granted_fps` em `raw_manager.rs`; fórmula é divisão (throughput ÷ frame_bytes), não multiplicação — o "×" do título da task é linguagem informal, não a operação real
 
 ### Implementation for User Story 5
 
-- [ ] T057 [US5] Fork: `RawCapture.java` — `ImageReader` RAW_SENSOR como surface extra, `DngCreator`, `raw_snapshot`/`raw_sequence_start|stop` com framing binário e `granted_fps`; `UNSUPPORTED`/`BUSY` conforme contrato
-- [ ] T058 [US5] Implementar `src-tauri/src/raw_manager.rs`: recepção, gravação em `raw_output_dir`, progresso (`raw_progress`), throttle dinâmico
-- [ ] T059 [US5] Comandos Tauri `raw_snapshot`, `raw_sequence_start/stop`, `set_raw_output_dir` em `src-tauri/src/lib.rs`
-- [ ] T060 [P] [US5] Frontend: `src/lib/RawPanel.svelte` (snapshot, fps, progresso, dir de saída; oculto sem capability RAW — FR-016/019)
-- [ ] T061 [US5] Validação manual: quickstart Cenário 5 (DNG abre no RawTherapee/Darktable em resolução nativa — SC-006; stream não degrada)
+- [x] T057 [US5] Fork: `RawCapture.java` — `ImageReader` RAW_SENSOR como surface extra, `DngCreator`, `raw_snapshot`/`raw_sequence_start|stop` com framing binário e `granted_fps`; `UNSUPPORTED`/`BUSY` conforme contrato — superfície RAW aditiva/condicional em `CameraCapture.java` (só quando `REQUEST_AVAILABLE_CAPABILITIES_RAW`, nunca em sessão high-speed), cadência recalculada a cada frame pelo throughput medido de escrita no socket (mesma fórmula do Rust). `./gradlew :server:testDebugUnitTest` e `build-camlink.sh` verdes (6 casos em `ProtocolTest`, incluindo BUSY e clamp de `granted_fps`; jar gerado). **Ainda sem validação em hardware real** (câmera/DngCreator/ImageReader não são testáveis em JVM unit test) — fica pro T061
+- [x] T058 [US5] Implementar `src-tauri/src/raw_manager.rs`: recepção, gravação em `raw_output_dir`, progresso (`raw_progress`), throttle dinâmico — inclui a reescrita do `spawn_reader` em `camera_controller.rs` pra demultiplexar linha NDJSON e frame binário (`0xD1`) no mesmo socket (testado com `tokio::io::duplex`/servidor TCP fake em `camera_controller_test.rs`); `handle_incoming_frame`/`stop_sequence`/`RawJobRuntime` roteiam Snapshot vs. Sequência (`raw_job_test.rs`, 8 casos)
+- [x] T059 [US5] Comandos Tauri `raw_snapshot`, `raw_sequence_start/stop`, `set_raw_output_dir` em `src-tauri/src/lib.rs` — job registrado ANTES do request pro fork (evita perder o primeiro frame numa corrida), `raw_output_dir` persiste entre `switch_camera`/rotação (`restart_android_session`). **Ainda não testável ponta a ponta**: depende do T057 (fork) pra existir alguém do outro lado do socket respondendo `raw_snapshot`/`raw_sequence_start` e mandando frames de verdade
+- [x] T060 [P] [US5] Frontend: `src/lib/RawPanel.svelte` (snapshot, fps, progresso, dir de saída; oculto sem capability RAW — FR-016/019) — `pnpm check` limpo (0 erros/warnings)
+- [x] T061 [US5] Validação manual: quickstart Cenário 5 (DNG abre no RawTherapee/Darktable em resolução nativa — SC-006; stream não degrada) — **validado (2026-08-06)**: Snapshot e duas Sequências RAW capturadas com sucesso num Galaxy S24 (SM-S921B), 16 DNGs de 23,8MB (4080×3060, 16bpp, sem compressão) confirmados íntegros — abrem corretamente no Darktable. Stream principal testado no OBS durante captura RAW: latência da câmera aumentou levemente, mas sem impacto na transmissão em si — SC-006 considerado atendido
 
 **Checkpoint**: US5 funcional e independente
 

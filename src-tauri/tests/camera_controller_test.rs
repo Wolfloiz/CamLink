@@ -10,6 +10,7 @@ use std::time::Duration;
 use camlink_lib::camera_controller::{
     adb_forward_args, ControlClient, ControlClientError, ControlEvent, ControlReply, ControlRequest,
 };
+use camlink_lib::raw_manager::{encode_frame, RawFrameMetadata};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
@@ -153,6 +154,81 @@ async fn request_times_out_when_server_never_replies() {
         matches!(err, ControlClientError::Timeout),
         "esperava Timeout, veio {err:?}"
     );
+}
+
+#[tokio::test]
+async fn raw_frame_binary_framing_is_demuxed_between_json_lines() {
+    // Contrato §4: o frame RAW binário (tag 0xD1) chega no MESMO socket que
+    // as linhas NDJSON — precisa continuar lendo eventos/respostas de texto
+    // normalmente antes e depois do frame binário no meio.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let metadata = RawFrameMetadata {
+        seq: 3,
+        timestamp_ms: 1_785_800_000_000,
+        width: 4032,
+        height: 3024,
+    };
+    let dng = vec![0xABu8; 256];
+    let framed = encode_frame(&metadata, &dng);
+
+    tokio::spawn({
+        let framed = framed.clone();
+        async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+
+            let first = lines.next_line().await.expect("read").expect("eof");
+            assert!(first.contains("hello"));
+            write
+                .write_all(format!("{HELLO_OK}\n").as_bytes())
+                .await
+                .expect("write hello");
+
+            // request do teste (raw_sequence_start)
+            let _ = lines.next_line().await.expect("read").expect("eof");
+
+            // Evento de texto ANTES do frame binário.
+            write
+                .write_all(b"{\"event\":\"af_state\",\"state\":\"searching\"}\n")
+                .await
+                .expect("write af_state");
+            // O frame binário em si (sem terminador de linha — é length-prefixed).
+            write.write_all(&framed).await.expect("write raw frame");
+            // Resposta do request, DEPOIS do frame binário no mesmo socket.
+            write
+                .write_all(b"{\"ok\":true,\"data\":{\"granted_fps\":2.0}}\n")
+                .await
+                .expect("write reply");
+        }
+    });
+
+    let (mut client, mut events) =
+        ControlClient::connect(("127.0.0.1", port), Duration::from_secs(2))
+            .await
+            .expect("connect");
+
+    let reply = client
+        .request(ControlRequest::RawSequenceStart { fps: 3.0 })
+        .await
+        .expect("raw_sequence_start");
+    match reply {
+        ControlReply::Ok(data) => assert_eq!(data["granted_fps"], 2.0),
+        other => panic!("esperava Ok, veio {other:?}"),
+    }
+
+    let first_event = events.recv().await.expect("evento af_state");
+    assert!(matches!(first_event, ControlEvent::AfState { .. }));
+
+    let second_event = events.recv().await.expect("evento RawFrame");
+    match second_event {
+        ControlEvent::RawFrame(frame) => {
+            assert_eq!(frame.metadata, metadata);
+            assert_eq!(frame.dng, dng);
+        }
+        other => panic!("esperava RawFrame, veio {other:?}"),
+    }
 }
 
 #[test]

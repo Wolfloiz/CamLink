@@ -77,6 +77,13 @@ fn typed_request(req: &Value) -> Option<ControlRequest> {
         "set_torch" => ControlRequest::SetTorch {
             enabled: req["enabled"].as_bool().expect("enabled"),
         },
+        "raw_snapshot" => ControlRequest::RawSnapshot,
+        "raw_sequence_start" => ControlRequest::RawSequenceStart {
+            // .ok()? / ? cobrem raw_sequence_start_missing_fps.json (campo
+            // ausente) — mesmo padrão de set_zoom acima.
+            fps: req.get("fps")?.as_f64()? as f32,
+        },
+        "raw_sequence_stop" => ControlRequest::RawSequenceStop,
         _ => return None, // ex.: unknown_cmd.json
     };
     Some(typed)

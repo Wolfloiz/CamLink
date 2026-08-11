@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "raw_sequence_stop" },
+  "response": { "ok": true, "data": {} }
+}

@@ -11,6 +11,7 @@ import type {
   ControlStateEvent,
   DeviceCapabilities,
   PreviewFrameEvent,
+  RawProgressEvent,
   RtspSource,
   SessionReplacedEvent,
   SessionStateEvent,
@@ -127,4 +128,34 @@ export function startRtsp(id: string): Promise<StartStreamResponse> {
 
 export function stopRtsp(id: string): Promise<void> {
   return invoke("stop_rtsp", { id });
+}
+
+// --- US5: Captura RAW ---
+
+export function rawSnapshot(sessionId: string): Promise<string> {
+  return invoke("raw_snapshot", { sessionId });
+}
+
+export function rawSequenceStart(
+  sessionId: string,
+  fps: number,
+): Promise<number> {
+  return invoke("raw_sequence_start", { sessionId, fps });
+}
+
+export function rawSequenceStop(sessionId: string): Promise<void> {
+  return invoke("raw_sequence_stop", { sessionId });
+}
+
+export function setRawOutputDir(
+  sessionId: string,
+  dir: string,
+): Promise<void> {
+  return invoke("set_raw_output_dir", { sessionId, dir });
+}
+
+export function onRawProgress(
+  handler: (event: RawProgressEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<RawProgressEvent>("raw_progress", (e) => handler(e.payload));
 }

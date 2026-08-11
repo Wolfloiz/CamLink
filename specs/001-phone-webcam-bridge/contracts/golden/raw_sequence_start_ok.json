@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "raw_sequence_start", "fps": 2.0 },
+  "response": { "ok": true, "data": { "granted_fps": 2.0 } }
+}

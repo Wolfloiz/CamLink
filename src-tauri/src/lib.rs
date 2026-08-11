@@ -158,6 +158,14 @@ struct SessionCtx {
     /// `adb forward --remove` depois, cada reconexão de controle deixava
     /// mais uma entrada órfã — 15 acumuladas num único aparelho de teste).
     forward_port: Option<u16>,
+    /// Job RAW ativo da sessão (US5) — no máximo 1 por vez (data-model.md).
+    /// `Arc` porque o loop de eventos de `ensure_control` (spawnado
+    /// separado do `SessionCtx`) precisa do mesmo slot que os comandos
+    /// `raw_snapshot`/`raw_sequence_start|stop` leem/escrevem.
+    raw_job: Arc<TokioMutex<Option<raw_manager::RawJobRuntime>>>,
+    /// `None` = usa o default (`dirs::picture_dir()/CamLink`) — configurável
+    /// via `set_raw_output_dir` (data-model.md, `RawCaptureJob.output_dir`).
+    raw_output_dir: Option<PathBuf>,
 }
 
 /// Remove o `adb forward` de uma sessão de controle encerrada. Best-effort:
@@ -493,6 +501,8 @@ async fn start_stream(
                     control_state: ControlState::default(),
                     control: None,
                     forward_port: None,
+                    raw_job: Arc::new(TokioMutex::new(None)),
+                    raw_output_dir: None,
                 },
             );
             Ok(response)
@@ -650,6 +660,7 @@ async fn ensure_control(
 
     // Encaminha eventos assíncronos do fork para o frontend (contrato §5).
     let app_events = app.clone();
+    let raw_job = Arc::clone(&ctx.raw_job);
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             match event {
@@ -661,6 +672,13 @@ async fn ensure_control(
                 }
                 ControlEvent::RawFrameDropped { reason } => {
                     tracing::info!(%reason, "frame RAW descartado pelo fork");
+                }
+                ControlEvent::RawFrame(frame) => {
+                    let mut slot = raw_job.lock().await;
+                    if let Some(job) = raw_manager::handle_incoming_frame(&mut slot, frame) {
+                        let _ =
+                            app_events.emit("raw_progress", RawProgressEvent { session_id, job });
+                    }
                 }
             }
         }
@@ -760,6 +778,14 @@ struct ControlStateEvent {
     control_state: ControlState,
 }
 
+/// Progresso de um job RAW (US5, FR-019/020): emitido a cada frame gravado
+/// numa Sequência, e ao fim de um Snapshot.
+#[derive(Clone, serde::Serialize)]
+struct RawProgressEvent {
+    session_id: Uuid,
+    job: model::RawCaptureJob,
+}
+
 /// FR-008..016a: aplica um controle na sessão. Controles de câmera vão pelo
 /// fork (validação server-side contra capabilities); `rotation`/`mirror`
 /// são transformação local (T080) — ao vivo quando as dimensões não mudam,
@@ -854,7 +880,7 @@ async fn set_orientation(
     session_id: Uuid,
     change: ControlChange,
 ) -> Result<ControlState, AppError> {
-    let (serial, config, vcam_id, orientation_cell, mut control_state, current) = {
+    let (serial, config, vcam_id, orientation_cell, mut control_state, current, raw_output_dir) = {
         let sessions = state.sessions.lock().await;
         let ctx = sessions
             .get(&session_id)
@@ -867,6 +893,7 @@ async fn set_orientation(
             Arc::clone(&ctx.orientation),
             ctx.control_state.clone(),
             current,
+            ctx.raw_output_dir.clone(),
         )
     };
 
@@ -913,6 +940,7 @@ async fn set_orientation(
         vcam_id,
         orientation_cell,
         control_state.clone(),
+        raw_output_dir,
         dims_changed,
     )
     .await?;
@@ -954,7 +982,7 @@ async fn switch_camera(
     session_id: Uuid,
     camera_id: String,
 ) -> Result<StartStreamResponse, AppError> {
-    let (serial, mut config, vcam_id, orientation_cell, control_state) = {
+    let (serial, mut config, vcam_id, orientation_cell, control_state, raw_output_dir) = {
         let sessions = state.sessions.lock().await;
         let ctx = sessions
             .get(&session_id)
@@ -965,6 +993,7 @@ async fn switch_camera(
             ctx.vcam_id,
             Arc::clone(&ctx.orientation),
             ctx.control_state.clone(),
+            ctx.raw_output_dir.clone(),
         )
     };
     config.camera_id = camera_id;
@@ -985,6 +1014,7 @@ async fn switch_camera(
         vcam_id,
         orientation_cell,
         control_state,
+        raw_output_dir,
         false,
     )
     .await
@@ -1018,6 +1048,7 @@ async fn restart_android_session(
     vcam_id: Uuid,
     orientation_cell: Arc<StdMutex<(Rotation, bool)>>,
     control_state: ControlState,
+    raw_output_dir: Option<PathBuf>,
     force_fresh_vcam: bool,
 ) -> Result<StartStreamResponse, AppError> {
     let lock = restart_lock_for(state, &serial).await;
@@ -1078,9 +1109,253 @@ async fn restart_android_session(
             control_state,
             control: None,
             forward_port: None,
+            raw_job: Arc::new(TokioMutex::new(None)),
+            raw_output_dir,
         },
     );
     Ok(response)
+}
+
+// ---------------------------------------------------------------------------
+// US5 — Captura RAW (T059)
+// ---------------------------------------------------------------------------
+
+/// Timeout esperando o frame chegar depois do `ok` de `raw_snapshot`
+/// (captura na resolução nativa do sensor + geração do DNG no aparelho pode
+/// levar um instante).
+const RAW_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn default_raw_output_dir() -> Result<PathBuf, AppError> {
+    dirs::picture_dir()
+        .map(|dir| dir.join("CamLink"))
+        .ok_or_else(|| {
+            AppError::new(
+                "raw_output_dir",
+                "Não encontrei o diretório de imagens da plataforma",
+            )
+            .with_hint("Defina manualmente com set_raw_output_dir.")
+        })
+}
+
+fn raw_output_dir_for(ctx: &SessionCtx) -> Result<PathBuf, AppError> {
+    match &ctx.raw_output_dir {
+        Some(dir) => Ok(dir.clone()),
+        None => default_raw_output_dir(),
+    }
+}
+
+/// Define o diretório de saída dos DNGs desta sessão (data-model.md,
+/// `RawCaptureJob.output_dir`) — não persiste entre sessões, só a URL/nome
+/// de fontes RTSP viram `AppConfig` hoje.
+#[tauri::command]
+async fn set_raw_output_dir(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+    dir: PathBuf,
+) -> Result<(), AppError> {
+    let mut sessions = state.sessions.lock().await;
+    let ctx = sessions
+        .get_mut(&session_id)
+        .ok_or_else(|| AppError::new("session_not_found", "Sessão não encontrada"))?;
+    ctx.raw_output_dir = Some(dir);
+    Ok(())
+}
+
+/// FR-019: Snapshot RAW — um frame DNG na resolução nativa do sensor salvo
+/// em disco. Bloqueia até o frame chegar (ou timeout). O fork responde
+/// `UNSUPPORTED` se o aparelho não expõe RAW e `BUSY` se já há uma captura
+/// em andamento (contrato §4) — ambos chegam aqui via `reply_to_result`.
+#[tauri::command]
+async fn raw_snapshot(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: Uuid,
+) -> Result<PathBuf, AppError> {
+    let (raw_job, output_dir) = {
+        let mut sessions = state.sessions.lock().await;
+        let ctx = sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| AppError::new("session_not_found", "Sessão não encontrada"))?;
+        ensure_control(&app, session_id, ctx).await?;
+        (Arc::clone(&ctx.raw_job), raw_output_dir_for(ctx)?)
+    };
+    std::fs::create_dir_all(&output_dir).map_err(|e| {
+        AppError::new(
+            "raw_output_dir",
+            format!("Não consegui criar o diretório de saída: {e}"),
+        )
+    })?;
+
+    // Registra o job ANTES de mandar o comando: o frame pode chegar pelo
+    // loop de eventos antes desta função retomar depois do `.await` do
+    // request, e sem o slot já pronto ele seria descartado em silêncio
+    // (`handle_incoming_frame` com `slot == None`).
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let mut slot = raw_job.lock().await;
+        if slot.is_some() {
+            return Err(AppError::new(
+                "raw_job_busy",
+                "Já existe uma captura RAW em andamento nesta sessão",
+            )
+            .with_hint("Espere terminar ou pare a captura atual antes de um novo snapshot."));
+        }
+        *slot = Some(raw_manager::RawJobRuntime::snapshot(output_dir.clone(), tx));
+    }
+
+    let sent = {
+        let mut sessions = state.sessions.lock().await;
+        let ctx = sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| AppError::new("session_not_found", "Sessão não encontrada"))?;
+        let client = ctx.control.as_mut().expect("ensure_control garantiu");
+        client
+            .request(ControlRequest::RawSnapshot)
+            .await
+            .map_err(|e| AppError::new("control_request_failed", e.to_string()))
+            .and_then(reply_to_result)
+    };
+    if let Err(err) = sent {
+        *raw_job.lock().await = None;
+        return Err(err);
+    }
+
+    let frame = match tokio::time::timeout(RAW_SNAPSHOT_TIMEOUT, rx).await {
+        Ok(Ok(frame)) => frame,
+        Ok(Err(_)) => {
+            return Err(AppError::new(
+                "raw_snapshot_failed",
+                "A captura RAW terminou sem entregar o frame",
+            ))
+        }
+        Err(_) => {
+            *raw_job.lock().await = None;
+            return Err(AppError::new(
+                "raw_snapshot_timeout",
+                "O aparelho não entregou o snapshot RAW a tempo",
+            ));
+        }
+    };
+
+    raw_manager::write_frame(&output_dir, &frame).map_err(|e| {
+        AppError::new(
+            "raw_write_failed",
+            format!("Falha ao gravar o DNG em disco: {e}"),
+        )
+    })
+}
+
+/// FR-019/020: Sequência RAW (1-3 fps, cadência ajustada dinamicamente pelo
+/// fork conforme a banda do túnel ADB — o vídeo principal tem prioridade).
+/// Devolve a fps efetivamente concedida (`granted_fps`, contrato §4), que
+/// pode ser menor que a pedida.
+#[tauri::command]
+async fn raw_sequence_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: Uuid,
+    fps: f32,
+) -> Result<f32, AppError> {
+    let (raw_job, output_dir) = {
+        let mut sessions = state.sessions.lock().await;
+        let ctx = sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| AppError::new("session_not_found", "Sessão não encontrada"))?;
+        ensure_control(&app, session_id, ctx).await?;
+        (Arc::clone(&ctx.raw_job), raw_output_dir_for(ctx)?)
+    };
+    std::fs::create_dir_all(&output_dir).map_err(|e| {
+        AppError::new(
+            "raw_output_dir",
+            format!("Não consegui criar o diretório de saída: {e}"),
+        )
+    })?;
+
+    {
+        let mut slot = raw_job.lock().await;
+        if slot.is_some() {
+            return Err(AppError::new(
+                "raw_job_busy",
+                "Já existe uma captura RAW em andamento nesta sessão",
+            )
+            .with_hint("Pare a captura atual antes de iniciar outra."));
+        }
+        // Registrado com a fps pedida como palpite inicial; ajustado pra
+        // `granted_fps` assim que a resposta chegar (mesma razão do
+        // snapshot: o job precisa existir ANTES do request pra não perder
+        // um frame que chegue rápido demais).
+        *slot = Some(raw_manager::RawJobRuntime::sequence(
+            output_dir.clone(),
+            fps,
+        ));
+    }
+
+    let result = {
+        let mut sessions = state.sessions.lock().await;
+        let ctx = sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| AppError::new("session_not_found", "Sessão não encontrada"))?;
+        let client = ctx.control.as_mut().expect("ensure_control garantiu");
+        client
+            .request(ControlRequest::RawSequenceStart { fps })
+            .await
+            .map_err(|e| AppError::new("control_request_failed", e.to_string()))
+            .and_then(reply_to_result)
+    };
+
+    match result {
+        Ok(data) => {
+            let granted_fps = data
+                .get("granted_fps")
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+                .unwrap_or(fps);
+            let mut slot = raw_job.lock().await;
+            if let Some(runtime) = slot.as_mut() {
+                runtime.job.kind = model::RawJobKind::Sequence {
+                    target_fps: granted_fps,
+                };
+                if let model::RawJobState::Running { effective_fps, .. } = &mut runtime.job.state {
+                    *effective_fps = granted_fps;
+                }
+            }
+            Ok(granted_fps)
+        }
+        Err(err) => {
+            *raw_job.lock().await = None;
+            Err(err)
+        }
+    }
+}
+
+/// Encerra a Sequência RAW ativa; idempotente (sem job ativo, é um no-op).
+#[tauri::command]
+async fn raw_sequence_stop(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: Uuid,
+) -> Result<(), AppError> {
+    let (raw_job, client_reply) = {
+        let mut sessions = state.sessions.lock().await;
+        let ctx = sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| AppError::new("session_not_found", "Sessão não encontrada"))?;
+        let raw_job = Arc::clone(&ctx.raw_job);
+        let reply = match ctx.control.as_mut() {
+            Some(client) => Some(client.request(ControlRequest::RawSequenceStop).await),
+            None => None,
+        };
+        (raw_job, reply)
+    };
+    if let Some(Err(e)) = client_reply {
+        tracing::warn!(error = %e, "raw_sequence_stop: falha ao avisar o fork (limpando estado local mesmo assim)");
+    }
+
+    let mut slot = raw_job.lock().await;
+    if let Some(job) = raw_manager::stop_sequence(&mut slot) {
+        let _ = app.emit("raw_progress", RawProgressEvent { session_id, job });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1576,7 +1851,11 @@ pub fn run() {
             remove_rtsp_source,
             list_rtsp_sources,
             start_rtsp,
-            stop_rtsp
+            stop_rtsp,
+            raw_snapshot,
+            raw_sequence_start,
+            raw_sequence_stop,
+            set_raw_output_dir
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

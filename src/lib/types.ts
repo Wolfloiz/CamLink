@@ -180,6 +180,38 @@ export interface PreviewFrameEvent {
   jpeg_base64: string;
 }
 
+// --- US5: Captura RAW (model.rs RawCaptureJob) ---
+
+export type RawJobKind = "snapshot" | { sequence: { target_fps: number } };
+
+export type RawJobState =
+  | { running: { frames: number; bytes: number; effective_fps: number } }
+  | "done"
+  | { failed: string };
+
+export interface RawCaptureJob {
+  kind: RawJobKind;
+  output_dir: string;
+  state: RawJobState;
+}
+
+export interface RawProgressEvent {
+  session_id: string;
+  job: RawCaptureJob;
+}
+
+export function isRawJobFailed(
+  state: RawJobState,
+): state is { failed: string } {
+  return typeof state === "object" && state !== null && "failed" in state;
+}
+
+export function isRawJobRunning(
+  state: RawJobState,
+): state is { running: { frames: number; bytes: number; effective_fps: number } } {
+  return typeof state === "object" && state !== null && "running" in state;
+}
+
 export function isSessionError(
   state: SessionState,
 ): state is { error: string } {

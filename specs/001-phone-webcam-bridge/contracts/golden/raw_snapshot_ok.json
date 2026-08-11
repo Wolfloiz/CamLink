@@ -1,0 +1,5 @@
+{
+  "capabilities": "full",
+  "request": { "cmd": "raw_snapshot" },
+  "response": { "ok": true, "data": {} }
+}

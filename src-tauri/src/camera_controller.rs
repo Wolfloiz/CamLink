@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -37,6 +37,9 @@ pub enum ControlRequest {
     SetWb { mode: WbMode },
     SetEis { enabled: bool },
     SetTorch { enabled: bool },
+    RawSnapshot,
+    RawSequenceStart { fps: f32 },
+    RawSequenceStop,
 }
 
 /// Espelho serde do formato de fio: tag `cmd`, campos achatados.
@@ -75,6 +78,11 @@ enum WireRequest {
     SetTorch {
         enabled: bool,
     },
+    RawSnapshot,
+    RawSequenceStart {
+        fps: f32,
+    },
+    RawSequenceStop,
 }
 
 impl ControlRequest {
@@ -111,6 +119,9 @@ impl ControlRequest {
             ControlRequest::SetWb { mode } => WireRequest::SetWb { mode: *mode },
             ControlRequest::SetEis { enabled } => WireRequest::SetEis { enabled: *enabled },
             ControlRequest::SetTorch { enabled } => WireRequest::SetTorch { enabled: *enabled },
+            ControlRequest::RawSnapshot => WireRequest::RawSnapshot,
+            ControlRequest::RawSequenceStart { fps } => WireRequest::RawSequenceStart { fps: *fps },
+            ControlRequest::RawSequenceStop => WireRequest::RawSequenceStop,
         }
     }
 
@@ -192,9 +203,19 @@ pub struct FaceRect {
 /// Evento assíncrono servidor → desktop (contrato §5).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlEvent {
-    AfState { state: String },
-    Faces { rects: Vec<FaceRect> },
-    RawFrameDropped { reason: String },
+    AfState {
+        state: String,
+    },
+    Faces {
+        rects: Vec<FaceRect>,
+    },
+    RawFrameDropped {
+        reason: String,
+    },
+    /// Frame RAW decodificado — NUNCA chega como linha NDJSON (contrato §4);
+    /// `spawn_reader` monta isso a partir do framing binário
+    /// (`raw_manager::parse_frame`), não de `parse_server_line`.
+    RawFrame(crate::raw_manager::RawFrame),
 }
 
 /// Uma linha vinda do servidor: resposta ou evento.
@@ -331,31 +352,96 @@ pub struct ControlClient {
     timeout: Duration,
 }
 
+/// Resultado de uma tentativa de extrair UM item do início do buffer
+/// acumulado do socket.
+enum DrainOutcome {
+    /// Item completo (resposta ou evento); os bytes já foram consumidos do
+    /// buffer.
+    Item(ServerMessage),
+    /// Linha vazia ou JSON inválido — ignorada (com log), bytes já
+    /// consumidos; não é motivo pra encerrar a conexão nem pra esperar mais
+    /// bytes, só tentar extrair o próximo item do que já está no buffer.
+    Skip,
+    /// Não há bytes suficientes no buffer pra decidir nada ainda — precisa
+    /// ler mais do socket antes de tentar de novo.
+    NeedMoreData,
+    /// Frame RAW corrompido (tag ou metadata inválidos) — framing binário
+    /// não tem como "ressincronizar" no meio de um frame, a conexão precisa
+    /// encerrar (contrato §4).
+    Fatal,
+}
+
+/// Extrai UM item (linha NDJSON ou frame RAW binário, contrato §4) do
+/// início de `buf`, consumindo os bytes usados. Puro (sem I/O) — testável
+/// isoladamente sem socket real. O byte `0xD1` nunca é o início de uma
+/// linha JSON válida (que sempre começa com `{`), então checar esse byte
+/// primeiro é suficiente pra decidir qual dos dois framings usar.
+fn drain_one(buf: &mut Vec<u8>) -> DrainOutcome {
+    if buf.first() == Some(&crate::raw_manager::RAW_FRAME_TAG) {
+        return match crate::raw_manager::parse_frame(buf) {
+            Ok(Some((frame, consumed))) => {
+                buf.drain(..consumed);
+                DrainOutcome::Item(ServerMessage::Event(ControlEvent::RawFrame(frame)))
+            }
+            Ok(None) => DrainOutcome::NeedMoreData,
+            Err(e) => {
+                tracing::warn!(error = %e, "frame RAW corrompido no socket de controle");
+                DrainOutcome::Fatal
+            }
+        };
+    }
+
+    let Some(pos) = buf.iter().position(|&b| b == b'\n') else {
+        return DrainOutcome::NeedMoreData;
+    };
+    let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+    let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]);
+    let line = line.trim_end_matches('\r');
+    if line.trim().is_empty() {
+        return DrainOutcome::Skip;
+    }
+    match parse_server_line(line) {
+        Ok(msg) => DrainOutcome::Item(msg),
+        Err(e) => {
+            let line = line.to_string();
+            tracing::warn!(error = %e, line, "linha inválida do servidor de controle");
+            DrainOutcome::Skip
+        }
+    }
+}
+
 fn spawn_reader(
     read: OwnedReadHalf,
 ) -> (mpsc::Receiver<ControlReply>, mpsc::Receiver<ControlEvent>) {
+    use tokio::io::AsyncReadExt;
+
     let (reply_tx, reply_rx) = mpsc::channel(16);
     let (event_tx, event_rx) = mpsc::channel(64);
     tokio::spawn(async move {
-        let mut lines = BufReader::new(read).lines();
+        let mut read = read;
+        let mut buf: Vec<u8> = Vec::with_capacity(8192);
+        let mut chunk = [0u8; 8192];
         loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => match parse_server_line(&line) {
-                    Ok(ServerMessage::Reply(reply)) => {
+            loop {
+                match drain_one(&mut buf) {
+                    DrainOutcome::Item(ServerMessage::Reply(reply)) => {
                         if reply_tx.send(reply).await.is_err() {
                             return;
                         }
                     }
-                    Ok(ServerMessage::Event(event)) => {
+                    DrainOutcome::Item(ServerMessage::Event(event)) => {
                         // Evento é descartável se ninguém escuta (preview da
                         // UI fechado, por exemplo) — nunca trava o leitor.
                         let _ = event_tx.try_send(event);
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, line, "linha inválida do servidor de controle");
-                    }
-                },
-                Ok(None) | Err(_) => return,
+                    DrainOutcome::Skip => continue,
+                    DrainOutcome::NeedMoreData => break,
+                    DrainOutcome::Fatal => return,
+                }
+            }
+            match read.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
             }
         }
     });
