@@ -6,10 +6,17 @@
 //! usaria para o adb/scrcpy reais):
 //!
 //! - `FAKE_BACKEND_MODE`: `stay_alive` (default) | `crash_once` | `stderr_error`
-//! - `FAKE_BACKEND_MARKER_FILE`: usado só em `crash_once`, para diferenciar a
-//!   primeira tentativa (crasha) de uma retentativa (fica de pé) — simula
-//!   "crash → Reconnecting → retomada" de forma determinística.
+//!   | `fail_then_succeed`
+//! - `FAKE_BACKEND_MARKER_FILE`: usado em `crash_once` e `fail_then_succeed`,
+//!   para diferenciar a primeira tentativa de uma retentativa — simula
+//!   "crash → Reconnecting → retomada" (`crash_once`, fica de pé depois) ou
+//!   uma fonte RTSP que só fica pronta depois de N tentativas
+//!   (`fail_then_succeed`, sai rápido em vez de ficar de pé — usado em
+//!   `probe_url_with_retry`, que espera o processo TERMINAR, não continuar
+//!   rodando).
 //! - `FAKE_BACKEND_STDERR_LINE`: usado só em `stderr_error`, texto a emitir.
+//! - `FAKE_BACKEND_FAIL_COUNT`: usado só em `fail_then_succeed`, quantas
+//!   tentativas falham antes da que sai com sucesso (default 1).
 //!
 //! Chamadas de setup curtas (`push`/`forward`, usadas só no bootstrap
 //! Windows de research.md R12; `pkill`/`pgrep`, usadas no Linux por
@@ -55,6 +62,25 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|_| "error: device unauthorized".to_string());
             eprintln!("{line}");
             ExitCode::FAILURE
+        }
+        "fail_then_succeed" => {
+            let marker = env::var("FAKE_BACKEND_MARKER_FILE")
+                .expect("FAKE_BACKEND_MARKER_FILE obrigatório em fail_then_succeed");
+            let fail_count: u32 = env::var("FAKE_BACKEND_FAIL_COUNT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            let attempts: u32 = std::fs::read_to_string(&marker)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            let _ = std::fs::write(&marker, (attempts + 1).to_string());
+            if attempts < fail_count {
+                eprintln!("fake source ainda não está pronta");
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         _ => {
             stay_alive();

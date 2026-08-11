@@ -1493,9 +1493,17 @@ async fn start_rtsp(
     let runtime_url = rtsp_manager::inject_credentials(&source.url, secret.as_deref());
 
     let paths = resolve_external_paths();
-    // Validação com timeout de 3 s (auth ≠ host inacessível) antes de criar
-    // qualquer recurso.
-    rtsp_manager::probe_url(&paths.ffmpeg, &runtime_url).await?;
+    // Validação (auth ≠ host inacessível) antes de criar qualquer recurso —
+    // com retry (T054): uma fonte recém-iniciada pode não estar pronta pra
+    // entregar o 1º frame dentro dos 3s de UMA tentativa.
+    rtsp_manager::probe_url_with_retry(
+        &paths.ffmpeg,
+        &runtime_url,
+        &paths.extra_env,
+        rtsp_manager::PROBE_MAX_ATTEMPTS,
+        rtsp_manager::PROBE_RETRY_DELAY,
+    )
+    .await?;
 
     // T065c: nome amigável no seletor do OBS (o nome que o usuário deu à
     // fonte, ex. "Câmera do portão") em vez do Uuid cru.

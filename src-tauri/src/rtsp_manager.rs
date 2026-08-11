@@ -193,7 +193,11 @@ pub fn classify_ffmpeg_failure(stderr: &str) -> RtspFailure {
 
 /// Valida que a URL responde, com timeout de 3 s (quickstart Cenário 4):
 /// decodifica 1 frame e sai. `url` já deve vir com credenciais injetadas.
-pub async fn probe_url(ffmpeg: &std::path::Path, url: &str) -> Result<(), AppError> {
+pub async fn probe_url(
+    ffmpeg: &std::path::Path,
+    url: &str,
+    extra_env: &[(String, String)],
+) -> Result<(), AppError> {
     validate_rtsp_url(url.split_once('@').map_or(url, |_| url))?;
 
     let mut args = ffmpeg_input_args(url);
@@ -207,6 +211,7 @@ pub async fn probe_url(ffmpeg: &std::path::Path, url: &str) -> Result<(), AppErr
 
     let mut cmd = Command::new(ffmpeg);
     cmd.args(&args)
+        .envs(extra_env.iter().cloned())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -246,6 +251,41 @@ pub async fn probe_url(ffmpeg: &std::path::Path, url: &str) -> Result<(), AppErr
                 .with_hint(failure.action_hint()))
         }
     }
+}
+
+/// Tentativas do probe inicial antes de desistir (T054): uma câmera IP recém
+/// ligada, ou o publicador de uma fonte de teste recém-iniciado, pode não
+/// estar pronta pra entregar o 1º frame dentro dos 3s de UMA tentativa —
+/// achado em bancada 2026-08-11, a fonte conectava e reconectava
+/// normalmente DEPOIS de iniciada, mas a 1ª tentativa falhava se `start_rtsp`
+/// fosse chamado cedo demais.
+pub const PROBE_MAX_ATTEMPTS: u32 = 3;
+
+/// Intervalo entre tentativas do probe inicial.
+pub const PROBE_RETRY_DELAY: Duration = Duration::from_millis(1500);
+
+/// Repete `probe_url` até `max_attempts` vezes (com `retry_delay` entre
+/// elas), parando na primeira que suceder. Devolve o erro da ÚLTIMA
+/// tentativa se todas falharem — ainda um erro acionável (auth vs.
+/// inacessível), só que só depois de dar à fonte uma chance de "esquentar".
+pub async fn probe_url_with_retry(
+    ffmpeg: &std::path::Path,
+    url: &str,
+    extra_env: &[(String, String)],
+    max_attempts: u32,
+    retry_delay: Duration,
+) -> Result<(), AppError> {
+    let mut last_err = None;
+    for attempt in 0..max_attempts.max(1) {
+        if attempt > 0 {
+            tokio::time::sleep(retry_delay).await;
+        }
+        match probe_url(ffmpeg, url, extra_env).await {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.expect("max_attempts.max(1) garante ao menos 1 iteração"))
 }
 
 // ---------------------------------------------------------------------------

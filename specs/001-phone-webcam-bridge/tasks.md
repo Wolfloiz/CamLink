@@ -446,10 +446,43 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
     (`vcam_for_exit`/parâmetro novo de `watch_for_shutdown_signal`).
   - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` e
     `cargo test` (227 testes, 21 suítes) confirmados limpos.
-  - **Não verificado ainda**: bancada — fechar o app de verdade (botão
-    fechar da janela) e confirmar no OBS/`v4l2loopback-ctl list` que os
-    devices somem, não só ficam sem writer. Sem hardware/app aberto nesta
-    sessão pra validar visualmente.
+  - **Validado em bancada (2026-08-11)**: fonte RTSP ativa, `SIGTERM` no
+    processo — log confirma `device v4l2 removido ao fechar o app` e o
+    device some do `v4l2loopback-ctl list` (não fica só sem writer). Cobre
+    o caminho de `watch_for_shutdown_signal`; o caminho de
+    `RunEvent::ExitRequested` (fechar pela janela) usa o mesmo
+    `purge_all()`, mas não foi clicado fisicamente — risco residual baixo,
+    mesmo código.
+
+- **T054 — reconexão RTSP travada, causa real encontrada e corrigida**
+  (reaberto pelo usuário, 2026-08-11, testando com mediamtx+ffmpeg: "está
+  conectando e reconectando" — ou seja, o supervisor de reconexão do
+  `start_session` já funciona bem — "porém, ao iniciar o app a câmera só
+  conecta quando eu dou esse comando: `ss -tnp | grep 8554`"). Causa: não é
+  o `ss` em si (comando somente-leitura, sem efeito colateral em rede) —
+  `rtsp_manager::probe_url` faz UMA tentativa só, com timeout de 3s
+  (`PROBE_TIMEOUT`), ANTES de `start_rtsp` alocar qualquer recurso; uma
+  fonte recém-iniciada (câmera IP ligando, ou o publicador ffmpeg do setup
+  de teste subindo) pode não estar pronta pra entregar o 1º frame nesses
+  3s — a falha aparece na hora como "Falha ao conectar / Câmera
+  inacessível", e o tempo que o usuário levou pra digitar o comando de
+  diagnóstico foi o que deu à fonte tempo de "esquentar" antes do próximo
+  clique em iniciar, não o comando em si.
+  - **Corrigido**: `rtsp_manager::probe_url_with_retry` repete o probe até
+    `PROBE_MAX_ATTEMPTS = 3` vezes, com `PROBE_RETRY_DELAY = 1500ms` entre
+    tentativas — devolve o erro da ÚLTIMA tentativa se todas falharem
+    (continua acionável, auth vs. inacessível). `probe_url` ganhou um
+    parâmetro `extra_env` (antes só usado no bootstrap Windows do adb) pra
+    permitir injetar `FAKE_BACKEND_*` isolado por teste sem mexer no
+    ambiente global do processo.
+  - Novo modo `fail_then_succeed` em `tests/bin/fake_backend.rs` (conta
+    tentativas num marker file, falha as N primeiras, sucede na seguinte —
+    sai rápido em vez de ficar de pé, diferente do `crash_once` existente)
+    + 2 testes novos em `rtsp_test.rs` cobrindo "sucede assim que a fonte
+    fica pronta" e "desiste depois de `max_attempts`".
+  - **Não verificado ainda**: bancada com câmera IP real (só testado com o
+    setup de mediamtx+ffmpeg desta sessão) — uma câmera real pode levar bem
+    mais que 3×3s pra ligar de vez.
 
 ## Notes
 

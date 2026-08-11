@@ -3,9 +3,12 @@
 //! em runtime (a URL persistida nunca as contém — FR-018a), validação de URL
 //! e classificação de falhas (erro de auth distinto de host inacessível).
 
+use std::path::PathBuf;
+use std::time::Duration;
+
 use camlink_lib::rtsp_manager::{
     classify_ffmpeg_failure, ffmpeg_input_args, inject_credentials, output_args_rawvideo,
-    output_args_v4l2, validate_rtsp_url, RtspFailure,
+    output_args_v4l2, probe_url_with_retry, validate_rtsp_url, RtspFailure,
 };
 
 // ---------------------------------------------------------------------------
@@ -145,5 +148,85 @@ fn failure_messages_are_actionable() {
             || msg.to_lowercase().contains("endereço")
             || msg.to_lowercase().contains("host"),
         "dica de rede deveria orientar sobre endereço/host: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// probe_url_with_retry (T054) — fonte que só fica pronta depois de N
+// tentativas (câmera IP recém-ligada, publicador de teste recém-iniciado).
+// Usa `fake_backend` no lugar do ffmpeg real (`FAKE_BACKEND_MODE=
+// fail_then_succeed`): sai rápido com falha/sucesso em vez de decodificar
+// um frame de verdade, então os testes não dependem de rede nem de um
+// servidor RTSP real.
+// ---------------------------------------------------------------------------
+
+fn fake_backend_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_fake_backend"))
+}
+
+fn fail_then_succeed_env(marker: &std::path::Path, fail_count: u32) -> Vec<(String, String)> {
+    vec![
+        ("FAKE_BACKEND_MODE".into(), "fail_then_succeed".into()),
+        (
+            "FAKE_BACKEND_MARKER_FILE".into(),
+            marker.to_string_lossy().into_owned(),
+        ),
+        ("FAKE_BACKEND_FAIL_COUNT".into(), fail_count.to_string()),
+    ]
+}
+
+#[tokio::test]
+async fn probe_url_with_retry_succeeds_once_the_source_is_ready() {
+    let marker = tempfile::NamedTempFile::new().expect("tempfile");
+
+    let result = probe_url_with_retry(
+        &fake_backend_path(),
+        "rtsp://127.0.0.1:8554/teste",
+        &fail_then_succeed_env(marker.path(), 2),
+        3,
+        Duration::from_millis(10),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "deveria suceder na 3ª tentativa (2 falhas configuradas): {result:?}"
+    );
+    let attempts: u32 = std::fs::read_to_string(marker.path())
+        .expect("marker")
+        .trim()
+        .parse()
+        .expect("contador numérico");
+    assert_eq!(
+        attempts, 3,
+        "deveria ter parado exatamente na 1ª que suceder"
+    );
+}
+
+#[tokio::test]
+async fn probe_url_with_retry_gives_up_after_max_attempts() {
+    let marker = tempfile::NamedTempFile::new().expect("tempfile");
+
+    let result = probe_url_with_retry(
+        &fake_backend_path(),
+        "rtsp://127.0.0.1:8554/teste",
+        &fail_then_succeed_env(marker.path(), 99),
+        3,
+        Duration::from_millis(10),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "fonte nunca fica pronta — deveria desistir"
+    );
+    let attempts: u32 = std::fs::read_to_string(marker.path())
+        .expect("marker")
+        .trim()
+        .parse()
+        .expect("contador numérico");
+    assert_eq!(
+        attempts, 3,
+        "deveria ter tentado exatamente max_attempts vezes"
     );
 }
