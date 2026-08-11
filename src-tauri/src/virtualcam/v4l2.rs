@@ -411,4 +411,26 @@ impl VirtualCameraBackend for V4l2Backend {
             Self::cleanup_duplicates(&existing, label, keep);
         }
     }
+
+    fn purge_all(&mut self) {
+        let ids: Vec<Uuid> = self.cameras.keys().copied().collect();
+        for id in ids {
+            let Some(managed) = self.cameras.remove(&id) else {
+                continue;
+            };
+            let device_path = managed.camera.backend_path.clone();
+            drop(managed); // mata o ffmpeg (Drop de ManagedCamera)
+            match Command::new(CTL_BIN)
+                .args(["delete", &device_path])
+                .output()
+            {
+                Ok(o) if o.status.success() => {
+                    tracing::info!(path = %device_path, "device v4l2 removido ao fechar o app");
+                }
+                _ => {
+                    tracing::debug!(path = %device_path, "falha ao remover device v4l2 ao fechar (talvez ainda em uso)")
+                }
+            }
+        }
+    }
 }

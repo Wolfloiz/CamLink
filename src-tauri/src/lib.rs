@@ -1772,6 +1772,7 @@ fn spawn_device_polling(app: AppHandle, adb_path: PathBuf) {
 async fn watch_for_shutdown_signal(
     stream_manager: StreamManager,
     rtsp: Arc<TokioMutex<HashMap<Uuid, RtspRuntime>>>,
+    vcam: Arc<StdMutex<Box<dyn VirtualCameraBackend + Send>>>,
 ) {
     #[cfg(unix)]
     {
@@ -1795,6 +1796,9 @@ async fn watch_for_shutdown_signal(
     tracing::info!("sinal de encerramento recebido; matando backends ativos");
     stream_manager.kill_all_backends().await;
     kill_all_rtsp(&rtsp).await;
+    if let Ok(mut vcam) = vcam.lock() {
+        vcam.purge_all();
+    }
     std::process::exit(0);
 }
 
@@ -1830,15 +1834,19 @@ pub fn run() {
     let stream_manager = StreamManager::new(resolve_external_paths());
     let rtsp_sessions: Arc<TokioMutex<HashMap<Uuid, RtspRuntime>>> =
         Arc::new(TokioMutex::new(HashMap::new()));
+    let vcam: Arc<StdMutex<Box<dyn VirtualCameraBackend + Send>>> =
+        Arc::new(StdMutex::new(new_vcam_backend()));
     runtime.spawn(watch_for_shutdown_signal(
         stream_manager.clone(),
         Arc::clone(&rtsp_sessions),
+        Arc::clone(&vcam),
     ));
     let stream_manager_for_exit = stream_manager.clone();
     let rtsp_for_exit = Arc::clone(&rtsp_sessions);
+    let vcam_for_exit = Arc::clone(&vcam);
     let app_state = AppState {
         stream_manager,
-        vcam: Arc::new(StdMutex::new(new_vcam_backend())),
+        vcam,
         devices: Arc::new(StdMutex::new(Vec::new())),
         sessions: TokioMutex::new(HashMap::new()),
         rtsp: rtsp_sessions,
@@ -1885,6 +1893,9 @@ pub fn run() {
                     stream_manager_for_exit.kill_all_backends().await;
                     kill_all_rtsp(&rtsp_for_exit).await;
                 });
+                if let Ok(mut vcam) = vcam_for_exit.lock() {
+                    vcam.purge_all();
+                }
             }
         });
 }

@@ -178,6 +178,19 @@ pub trait VirtualCameraBackend {
     /// acumular vários "CamLink Android" na lista de devices). Default:
     /// no-op (Windows não tem esse tipo de duplicata).
     fn cleanup_stale(&mut self) {}
+
+    /// Remove definitivamente todos os devices desta execução do app —
+    /// diferente de `destroy`, que mantém o device propositalmente para
+    /// reuso entre sessões (troca de câmera, restart) enquanto o app
+    /// continua rodando. Chamado só nos hooks de encerramento do processo
+    /// inteiro (fechar a janela, Ctrl+C/SIGTERM): sem isso, o device v4l2
+    /// ficava registrado para sempre depois de fechar o app — o `ffmpeg`
+    /// que o alimentava morria (stdin fecha com o processo pai), mas o
+    /// device continuava listado no OBS/Chrome, agora sem ninguém
+    /// escrevendo nele ("câmera inacessível", achado em bancada
+    /// 2026-08-11). Default: no-op (Windows recria o filtro DirectShow do
+    /// zero a cada `start_stream`; nada fica pendurado ao fechar).
+    fn purge_all(&mut self) {}
 }
 
 /// Gera a imagem de espera (FR-006): fundo escuro com o glifo de câmera do

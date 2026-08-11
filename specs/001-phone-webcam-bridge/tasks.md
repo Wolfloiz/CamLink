@@ -419,6 +419,38 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
        `label` é consumido, mas o comportamento real do filtro com esses
        nomes não foi testado nessa plataforma).
 
+- **T065d — Device v4l2 "fantasma" no OBS depois de fechar o app** (achado
+  pelo usuário, 2026-08-11: abriu o OBS sem o CamLink rodando e ainda via
+  câmeras "CamLink ..." listadas, inacessíveis). Causa: `V4l2Backend::destroy`
+  (`v4l2.rs:379`) deliberadamente NÃO apaga o device v4l2loopback — ele é
+  reaproveitado entre restarts (troca de câmera, reconexão) enquanto o app
+  continua rodando (comportamento correto, T062). O problema é que os dois
+  hooks de encerramento do processo inteiro (`RunEvent::ExitRequested` em
+  `lib.rs:1883` e `watch_for_shutdown_signal` em `lib.rs:1772`, ambos
+  adicionados em 2026-07-28 pro bug do `scrcpy` órfão) só matavam os
+  backends de CAPTURA (scrcpy/ffmpeg de origem) — nunca chamavam nada em
+  `state.vcam`. O `ffmpeg` que escrevia no device v4l2 morria sozinho (stdin
+  fecha quando o processo pai sai), mas o device continuava registrado no
+  kernel sem ninguém escrevendo — daí "inacessível" no OBS até o próximo
+  `cargo tauri dev`/app start rodar `cleanup_stale()` (que só reaproveita 1
+  device por label, não some com ele).
+  - **Corrigido**: novo método `VirtualCameraBackend::purge_all(&mut self)`
+    (default no-op — Windows recria o filtro DirectShow do zero a cada
+    `start_stream`, nada fica pendurado ao fechar). `V4l2Backend::purge_all`
+    dreina `self.cameras`, mata cada `ffmpeg` (via `Drop` de `ManagedCamera`)
+    e chama `v4l2loopback-ctl delete <path>` pra cada device — best-effort,
+    igual ao `cleanup_duplicates` existente. Fiado nos dois hooks de
+    shutdown (`lib.rs`): precisou trocar `Arc::new(StdMutex::new(new_vcam_backend()))`
+    de dentro do `AppState` pra uma variável `vcam` construída antes,
+    clonada tanto pro `app_state` quanto pros dois hooks
+    (`vcam_for_exit`/parâmetro novo de `watch_for_shutdown_signal`).
+  - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` e
+    `cargo test` (227 testes, 21 suítes) confirmados limpos.
+  - **Não verificado ainda**: bancada — fechar o app de verdade (botão
+    fechar da janela) e confirmar no OBS/`v4l2loopback-ctl list` que os
+    devices somem, não só ficam sem writer. Sem hardware/app aberto nesta
+    sessão pra validar visualmente.
+
 ## Notes
 
 - Spike A tem critério de abortar explícito (T015) — replaneje ANTES de investir nas Phases 4/5/7 se falhar
