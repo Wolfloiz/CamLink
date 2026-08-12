@@ -119,6 +119,28 @@ pub fn ctl_supports_dynamic_add(version: Option<(u32, u32, u32)>) -> bool {
     matches!(version, Some(v) if v >= (0, 13, 0))
 }
 
+/// Devices criados por este app (label começando com `prefix`, ver
+/// `virtualcam::LABEL_PREFIX`) — candidatos a remoção na limpeza de start.
+///
+/// Devolve TODOS os que casam, sem tentar adivinhar quais estão em uso: o
+/// `v4l2loopback-ctl delete` falha com EBUSY quando alguém está com o device
+/// aberto, então um consumidor ativo já protege o device sozinho. Devices de
+/// outros programas (ex.: `CamDroidLink A` desta máquina, ou a câmera virtual
+/// do OBS) nunca casam e não são tocados.
+///
+/// Não conflita com o reuso de device entre sessões (`find_reusable_device`):
+/// desde o T065d o app apaga os próprios devices ao encerrar (`purge_all`),
+/// então nada deveria sobreviver entre execuções — esta função é a rede de
+/// segurança pro caso do `purge_all` não chegar a rodar (crash, ou o sinal
+/// não chegar ao binário, como no `Ctrl+C` do `pnpm tauri dev`).
+pub fn orphan_devices(existing: &[LoopbackDevice], prefix: &str) -> Vec<String> {
+    existing
+        .iter()
+        .filter(|d| d.name.starts_with(prefix))
+        .map(|d| d.output.clone())
+        .collect()
+}
+
 /// Detecta o bloqueio clássico do Secure Boot ao carregar um módulo de
 /// kernel não assinado (`modprobe: ... Key was rejected by service`).
 pub fn detect_secure_boot_block(stderr: &str) -> Option<AppError> {
@@ -399,16 +421,22 @@ impl VirtualCameraBackend for V4l2Backend {
     }
 
     fn cleanup_stale(&mut self) {
+        // Roda na construção do backend, antes de qualquer sessão existir —
+        // então todo device com label deste app aqui é sobra de uma execução
+        // anterior que não chegou a rodar `purge_all` (crash, ou sinal que
+        // não chegou ao binário). Sem isso ele fica pra sempre, aparecendo
+        // no OBS como câmera inacessível (achado em bancada 2026-08-11:
+        // `/dev/video5-8` sobraram, livres, depois de uma sessão de teste).
+        // Best-effort: `delete` falha com EBUSY se um consumidor estiver com
+        // o device aberto — nesse caso ele fica e é reaproveitado.
         let existing = Self::list_devices();
-        let mut labels: Vec<&str> = existing.iter().map(|d| d.name.as_str()).collect();
-        labels.sort_unstable();
-        labels.dedup();
-        for label in labels {
-            let keep = existing
-                .iter()
-                .find(|d| d.name == label)
-                .map(|d| d.output.as_str());
-            Self::cleanup_duplicates(&existing, label, keep);
+        for path in orphan_devices(&existing, super::LABEL_PREFIX) {
+            match Command::new(CTL_BIN).args(["delete", &path]).output() {
+                Ok(o) if o.status.success() => {
+                    tracing::info!(%path, "device v4l2 órfão de execução anterior removido");
+                }
+                _ => tracing::debug!(%path, "device órfão em uso ou não removível — mantido"),
+            }
         }
     }
 

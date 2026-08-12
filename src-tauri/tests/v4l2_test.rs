@@ -22,9 +22,9 @@
 
 use camlink_lib::virtualcam::v4l2::{
     build_add_args, ctl_supports_dynamic_add, detect_secure_boot_block, find_reusable_device,
-    parse_added_device, parse_ctl_version, parse_list_output, LoopbackDevice,
+    orphan_devices, parse_added_device, parse_ctl_version, parse_list_output, LoopbackDevice,
 };
-use camlink_lib::virtualcam::vcam_label;
+use camlink_lib::virtualcam::{vcam_label, LABEL_PREFIX};
 
 // ---------------------------------------------------------------------------
 // parse_added_device — saída de `v4l2loopback-ctl add -n <label> -x 1`
@@ -142,6 +142,47 @@ fn label_match_is_exact_not_prefix() {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// orphan_devices — devices deixados por uma execução anterior que não chegou a
+// rodar `purge_all` (achado em bancada 2026-08-11: com o app E o OBS fechados,
+// `/dev/video5-8` continuavam listados, sem NINGUÉM segurando — o `delete`
+// teria funcionado, o `purge_all` é que não rodou; provável `Ctrl+C` no
+// `pnpm tauri dev`, que não repassa o sinal pro binário filho).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn orphan_devices_lists_every_device_created_by_this_app() {
+    let devices = vec![
+        dev("/dev/video5", "CamLink IP (teste-1 #2469)"),
+        dev("/dev/video6", "CamLink Android (SM_S921B P11P)"),
+    ];
+    assert_eq!(
+        orphan_devices(&devices, LABEL_PREFIX),
+        vec!["/dev/video5".to_string(), "/dev/video6".to_string()]
+    );
+}
+
+#[test]
+fn orphan_devices_never_touches_devices_from_other_tools() {
+    // Caso real desta máquina: "CamDroidLink A/B/C" são de outro app e NÃO
+    // podem ser removidos — o prefixo tem que casar de verdade, não por acaso.
+    let devices = vec![
+        dev("/dev/video2", "CamDroidLink A"),
+        dev("/dev/video3", "OBS Virtual Camera"),
+        dev("/dev/video4", "CamLink Android (SM_S921B P11P)"),
+    ];
+    assert_eq!(
+        orphan_devices(&devices, LABEL_PREFIX),
+        vec!["/dev/video4".to_string()]
+    );
+}
+
+#[test]
+fn orphan_devices_on_a_clean_machine_is_empty() {
+    assert!(orphan_devices(&[], LABEL_PREFIX).is_empty());
+    assert!(orphan_devices(&[dev("/dev/video0", "Integrated Camera")], LABEL_PREFIX).is_empty());
+}
+
 // vcam_label — discrimina fontes concorrentes (T062/US6): duas sessões
 // diferentes (dois celulares, ou celular + RTSP) nunca podem colidir no
 // mesmo label, senão `find_reusable_device` rouba o device uma da outra.
@@ -193,6 +234,22 @@ fn find_reusable_device_picks_the_device_matching_the_discriminated_label() {
 }
 
 // ---------------------------------------------------------------------------
+/// Fecha o ciclo dos dois itens acima: o label que o app cria é exatamente o
+/// que a limpeza de órfãos reconhece como seu. Se divergisse, o device viraria
+/// fantasma permanente (criado pelo app, nunca limpo por ele).
+#[test]
+fn labels_created_by_this_app_are_recognized_as_its_own_orphans() {
+    let devices = vec![
+        dev("/dev/video5", &vcam_label("camera teto", "P11P")),
+        dev("/dev/video6", &vcam_label("", "R58M12ABCDE")),
+        dev("/dev/video7", "CamDroidLink A"),
+    ];
+    assert_eq!(
+        orphan_devices(&devices, LABEL_PREFIX),
+        vec!["/dev/video5".to_string(), "/dev/video6".to_string()]
+    );
+}
+
 // parse_ctl_version / ctl_supports_dynamic_add — gate de fallback (R3)
 // ---------------------------------------------------------------------------
 

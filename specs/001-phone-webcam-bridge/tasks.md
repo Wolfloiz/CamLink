@@ -397,6 +397,39 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
     e MATA o processo ao desistir, provado lendo o PID que o fake grava e
     conferindo `/proc/<pid>`), com modo `hang` novo no `fake_backend`.
 
+- **Devices fantasma reapareceram depois da sessão de teste do usuário**
+  (2026-08-11, T065d não cobre este caminho): com o app e o OBS fechados,
+  `v4l2loopback-ctl list` ainda mostrava `/dev/video5-8` (`CamLink IP
+  (teste-1 #2469)`, `CamLink Android (SM_S921B (P11P`, `... (camera para o `,
+  `... (camera teto (P`) — e `fuser` mostrava **ninguém** segurando video5/6/7,
+  ou seja o `delete` teria funcionado: o `purge_all` simplesmente não rodou.
+  Hipótese principal: a sessão foi encerrada por `Ctrl+C` no `pnpm tauri
+  dev`, e o `pnpm`/`cargo run` não repassa o sinal pro binário filho — o
+  mesmo cenário que o comentário de `watch_for_shutdown_signal`
+  (`lib.rs:1762-1771`) já descreve pro bug do `scrcpy` órfão. O
+  `RunEvent::ExitRequested` (fechar a janela) e o SIGTERM direto no binário
+  já foram validados; falta cobrir "processo pai morre sem repassar sinal".
+  Candidatos: limpar devices órfãos no START (o `cleanup_stale()` já roda
+  na construção do backend mas só colapsa duplicatas do mesmo label — não
+  remove label sem dono), ou não depender só de sinal.
+  - **Corrigido (2026-08-11, TDD)** pelo caminho do START, que cobre também
+    crash (nenhum hook de saída roda) e não só o sinal perdido:
+    `cleanup_stale()` passou a apagar TODO device cujo label começa com
+    `virtualcam::LABEL_PREFIX` (`v4l2::orphan_devices`, função pura). Roda
+    na construção do backend, quando nenhuma sessão existe ainda, e é
+    best-effort: se um consumidor estiver com o device aberto o `delete`
+    falha com EBUSY e o device fica (e é reaproveitado). Não conflita com o
+    reuso entre sessões porque desde o T065d o app já apaga os próprios
+    devices ao encerrar — nada deveria sobreviver entre execuções.
+  - Pra o prefixo ser confiável como "dono", os labels-base saíram de
+    `lib.rs` e viraram `virtualcam::LABEL_PREFIX` (fonte única), com teste
+    fechando o ciclo cria→reconhece
+    (`labels_created_by_this_app_are_recognized_as_its_own_orphans`) e um
+    caso explícito garantindo que `CamDroidLink A/B/C` (de outro app, reais
+    nesta máquina) e `OBS Virtual Camera` NUNCA são tocados.
+  - Devices `/dev/video5-8` da sessão do usuário removidos manualmente
+    nesta sessão, depois de confirmar que estavam livres.
+
 - **Truncamento do label corta no meio da estrutura** (visível nos devices
   acima): `MAX_LABEL_LEN = 31` corta cru, produzindo
   `CamLink Android (SM_S921B (P11P` e `CamLink Android (camera para o ` —
