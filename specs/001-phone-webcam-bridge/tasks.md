@@ -228,7 +228,6 @@ do fork, Java), `installer/{linux,windows}/`.
 ---
 
 ## Phase 9: Polish & Cross-Cutting Concerns
-
 - [ ] T066 [P] Instalador Linux: `installer/linux/install.sh` (deps, policy polkit, udev rules, modules-load.d) + bundle `.deb`/AppImage + `installer/linux/PKGBUILD` (AUR), jar do fork embutido (FR-024)
 - [ ] T067 [P] Instalador Windows: NSIS/MSI via Tauri bundler com adb/scrcpy/ffmpeg embutidos + registro do filtro DirectShow próprio (`regsvr32` equivalente no instalador, sem driver de terceiros) em `installer/windows/` (FR-024)
 - [ ] T068 [P] System tray + auto-connect de dispositivos lembrados (`AppConfig.auto_connect`) em `src-tauri/src/main.rs`
@@ -367,6 +366,39 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
     do backend; enquanto o Android/Linux usar `--v4l2-sink`, o preview não
     tem como coexistir com um consumidor real. O port continua sendo o único
     caminho pro read-back.**
+  - **Diagnóstico D2 (2026-08-12) — o "piscar" eram DOIS defeitos somados, e
+    o de frontend foi corrigido.** Ponto de partida: o backend NUNCA volta o
+    preview pro placeholder — quando o snapshot falha, `run_preview_pipeline`
+    só pula a rodada (`stream_manager.rs:1156-1161`) e nenhum evento é
+    emitido, então o frame anterior continua na tela congelado. Logo o
+    sintoma relatado ("volta pra *Aguardando primeiro frame*") só podia vir
+    do frontend, e por exatamente dois caminhos: (a) `Preview.svelte` zerava
+    `frameSrc` no `$effect`, cuja única dependência é `sessionId`; (b) o
+    componente ser destruído e recriado, o que exige a chave do `{#each}`
+    (`SourceGrid.svelte:23`, `source.id`) mudar. **Os dois caminhos tinham a
+    MESMA origem**: `adoptSession`/`onSessionReplaced` reescreviam
+    `ActiveSource.id` com o `session_id` novo, e no Linux TODO giro/espelho
+    passa pelo restart (`lib.rs::set_orientation`, "Caminho de restart:
+    Linux sempre"). Resultado: a cada giro o card inteiro era destruído e
+    recriado com preview zerado — e aí o D1 entra como agravante, porque a
+    sessão nova só consegue o primeiro frame quando o OBS soltar o device,
+    deixando o placeholder pendurado por segundos em vez de ~200 ms.
+    - Corrigido: `ActiveSource.id` virou identidade ESTÁVEL da fonte
+      (`android:<serial>`; o RTSP já fazia assim com o id da fonte
+      configurada) e só `sessionId` muda no restart. Some junto o remendo
+      `if (expandedId === oldId) expandedId = newId` dos dois handlers.
+    - Corrigido: `Preview.svelte` só descarta o frame quando `sessionId`
+      vira `null` (sessão realmente encerrada). Numa troca de sessão o
+      último frame fica na tela — é a mesma câmera física, e quem sinaliza
+      problema é o status do card, não o sumiço da imagem.
+    - As duas partes são necessárias: a identidade estável evita o remount
+      (que zeraria o estado de qualquer jeito) e o `$effect` conservador
+      evita o blank na troca de prop.
+    - **Falta validar em bancada** que não sobrou um terceiro caminho: se o
+      preview piscar SEM giro/troca de câmera/parar-iniciar, o mecanismo é
+      outro e o D2 não está fechado. Sem runner de teste no frontend (o
+      projeto nunca teve — `pnpm check` só faz type-check), essa é a única
+      verificação possível, igual foi feito no T065c/T065e.
 
 - **`run_preview_pipeline` não tem timeout no snapshot** (achado durante o
   D1, 2026-08-11 — bug independente do item acima, e barato de corrigir).

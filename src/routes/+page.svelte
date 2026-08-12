@@ -138,13 +138,18 @@
     onSessionReplaced((event) => {
       const idx = sources.findIndex((s) => s.sessionId === event.old_session_id);
       if (idx === -1) return;
-      const newId = event.response.session_id;
+      // Só o `sessionId` muda — `id` é a identidade estável da fonte, e
+      // mexer nele aqui destruía/recriava o card inteiro (D2).
       sources = sources.map((s, i) =>
         i === idx
-          ? { ...s, id: newId, sessionId: newId, state: event.response.state, stats: event.response.stats }
+          ? {
+              ...s,
+              sessionId: event.response.session_id,
+              state: event.response.state,
+              stats: event.response.stats,
+            }
           : s,
       );
-      if (expandedId === event.old_session_id) expandedId = newId;
     }).then((fn) => {
       unlistenSessionReplaced = fn;
     });
@@ -175,22 +180,23 @@
     unlistenControlState?.();
   });
 
-  /** switch_camera / girar 90°-270° reiniciam a sessão → session_id novo. */
-  function adoptSession(oldId: string, response: StartStreamResponse) {
-    const newId = response.session_id;
+  /**
+   * switch_camera / girar 90°-270° reiniciam a sessão → session_id novo. A
+   * identidade da fonte (`id`) NÃO muda: é a mesma câmera do mesmo aparelho,
+   * e trocá-la faria a grade destruir e recriar o card (D2).
+   */
+  function adoptSession(sourceId: string, response: StartStreamResponse) {
     sources = sources.map((s) =>
-      s.id === oldId
+      s.id === sourceId
         ? {
             ...s,
-            id: newId,
-            sessionId: newId,
+            sessionId: response.session_id,
             state: response.state,
             stats: response.stats,
             controlState: null, // sessão nova: modo corrente ainda não é conhecido
           }
         : s,
     );
-    if (expandedId === oldId) expandedId = newId;
   }
 
   async function handleTapToFocus(x: number, y: number) {
@@ -239,7 +245,9 @@
       const response = await startStream(selectedDevice.serial, buildConfig());
       const newSource: ActiveSource = {
         kind: "android",
-        id: response.session_id,
+        // Identidade estável (ver `ActiveSource.id`): o serial não muda entre
+        // restarts internos, o `session_id` muda.
+        id: `android:${selectedDevice.serial}`,
         sessionId: response.session_id,
         name: deviceNicknames[selectedDevice.serial] || selectedDevice.model,
         meta: `adb · USB · ${selectedDevice.serial}`,

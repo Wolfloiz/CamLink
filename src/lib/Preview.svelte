@@ -26,13 +26,22 @@
   let unlisten: (() => void) | null = null;
 
   $effect(() => {
-    // Troca de sessão (ou volta a inativo): descarta o frame antigo, senão
-    // fica mostrando uma imagem congelada de uma sessão que já acabou.
-    frameSrc = null;
-
     if (!sessionId) {
+      // Sessão acabou de verdade: descarta o frame, senão fica mostrando uma
+      // imagem congelada de algo que não está mais transmitindo.
+      frameSrc = null;
       return;
     }
+
+    // Numa TROCA de sessão (giro/espelho/switch_camera, que no Linux sempre
+    // reiniciam a sessão — lib.rs `set_orientation`) o frame antigo é mantido
+    // de propósito: é a mesma câmera física, e limpar aqui era metade do
+    // "preview piscando" (D2, 2026-08-12). O outro meio segundo vinha do
+    // read-back do v4l2 (D1): com o OBS segurando o device, o primeiro frame
+    // da sessão nova pode demorar, e apagar antes deixava o placeholder
+    // "Aguardando primeiro frame" pendurado no lugar de uma imagem válida.
+    // Quem sinaliza que a sessão não está saudável é o status do card, não o
+    // sumiço do preview.
 
     const currentSession = sessionId;
     let cancelled = false;

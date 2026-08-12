@@ -244,12 +244,16 @@ export const MAX_CONCURRENT_SOURCES = 4;
  * não precisar conhecer a diferença. */
 export interface ActiveSource {
   kind: "android" | "rtsp";
-  /** Android: mesmo valor que `sessionId` (muda em restart). RTSP: id
-   * estável da fonte configurada (usado por `stopRtsp`/`removeRtspSource`,
-   * nunca muda mesmo que a sessão reinicie). */
+  /** Identidade ESTÁVEL da fonte, nunca o id da sessão corrente: Android usa
+   * `android:<serial>`, RTSP usa o id da fonte configurada (também usado por
+   * `stopRtsp`/`removeRtspSource`). É a chave do `{#each}` da grade e o valor
+   * de `expandedId` — se mudasse a cada restart interno, o card inteiro (e o
+   * `Preview` dentro dele) seria destruído e recriado, zerando o preview a
+   * cada giro/troca de câmera (D2, 2026-08-12). */
   id: string;
-  /** Sessão de stream corrente — usada pelo `Preview`/`setControl`/etc.
-   * Igual a `id` no caso Android; independente no caso RTSP. */
+  /** Sessão de stream corrente — usada pelo `Preview`/`setControl`/etc. É a
+   * que muda em restart interno (`session_replaced`, `adoptSession`),
+   * enquanto `id` fica parado. */
   sessionId: string;
   name: string;
   /** Linha secundária do card: "adb · USB · <serial>" ou a URL RTSP. */
