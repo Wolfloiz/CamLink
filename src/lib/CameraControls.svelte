@@ -65,10 +65,18 @@
     }
   });
 
+  // Sessão já carregada — `let` cru de propósito (ver ModeSelector).
+  let capsLoadedFor: string | null = null;
+
   $effect(() => {
-    // Recarrega quando a sessão muda (switch/rotate criam sessão nova).
-    void sessionId;
-    caps = null;
+    // Recarrega quando a sessão muda (switch_camera troca a câmera aberta, e
+    // iso_range/wb_modes são características DELA). Não zera `caps` antes:
+    // `get_capabilities` é um round-trip até o aparelho com janela de retry,
+    // e apagar os controles durante a espera era o "piscar" que deixava os
+    // botões inclicáveis. O guard evita refazer a chamada quando o efeito
+    // re-roda sem a sessão ter mudado de fato.
+    if (capsLoadedFor === sessionId) return;
+    capsLoadedFor = sessionId;
     capsError = null;
     getCapabilities(serial)
       .then((c) => (caps = c))

@@ -80,8 +80,24 @@ export function onPreviewFrame(
 
 // --- US2: controles de câmera ---
 
+/**
+ * Chamadas em voo por serial. Três painéis (ModeSelector, CameraControls,
+ * RawPanel) pedem as capabilities do MESMO aparelho ao mesmo tempo sempre que
+ * a sessão muda, e do lado Rust `get_capabilities` segura o lock de
+ * `state.sessions` durante um round-trip até o aparelho (com janela de retry):
+ * as três chamadas serializavam e o painel inteiro ficava travado. Só o
+ * pedido em voo é compartilhado — nada é cacheado entre chamadas, porque
+ * `switch_camera` troca a câmera aberta e com ela iso_range/wb_modes.
+ */
+const capabilitiesInFlight = new Map<string, Promise<DeviceCapabilities>>();
+
 export function getCapabilities(serial: string): Promise<DeviceCapabilities> {
-  return invoke("get_capabilities", { serial });
+  const pending = capabilitiesInFlight.get(serial);
+  if (pending) return pending;
+  const request = invoke<DeviceCapabilities>("get_capabilities", { serial })
+    .finally(() => capabilitiesInFlight.delete(serial));
+  capabilitiesInFlight.set(serial, request);
+  return request;
 }
 
 export function setControl(

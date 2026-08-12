@@ -39,9 +39,15 @@
   let outputDir = $state("");
   let unlistenProgress: (() => void) | null = null;
 
+  // Sessão já carregada — `let` cru de propósito (ver ModeSelector).
+  let capsLoadedFor: string | null = null;
+
   $effect(() => {
-    void sessionId;
-    caps = null;
+    // Não zera `caps` antes de recarregar: `get_capabilities` é um round-trip
+    // até o aparelho e apagar o painel durante a espera era o "piscar" dos
+    // controles. O guard evita refazer a chamada à toa.
+    if (capsLoadedFor === sessionId) return;
+    capsLoadedFor = sessionId;
     getCapabilities(serial)
       .then((c) => (caps = c))
       .catch(() => {

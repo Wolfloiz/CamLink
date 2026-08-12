@@ -37,10 +37,19 @@
   let busy = $state(false);
   let caps = $state<DeviceCapabilities | null>(null);
 
+  // Sessão já carregada — `let` cru de propósito: se fosse `$state` viraria
+  // dependência do próprio efeito que a escreve.
+  let capsLoadedFor: string | null = null;
+
   $effect(() => {
-    // Recarrega quando a sessão muda (switch/rotate criam sessão nova).
-    void sessionId;
-    caps = null;
+    // Recarrega quando a sessão muda (switch_camera troca a câmera aberta, e
+    // iso_range/wb_modes são características DELA). Não zera `caps` antes:
+    // `get_capabilities` é um round-trip até o aparelho com janela de retry,
+    // e apagar o painel durante a espera era o "piscar" dos controles.
+    // O guard evita refazer a chamada quando o efeito re-roda sem a sessão
+    // ter mudado de fato.
+    if (capsLoadedFor === sessionId) return;
+    capsLoadedFor = sessionId;
     getCapabilities(serial).then((c) => (caps = c));
   });
 

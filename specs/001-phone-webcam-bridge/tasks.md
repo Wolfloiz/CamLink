@@ -399,6 +399,30 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
       outro e o D2 não está fechado. Sem runner de teste no frontend (o
       projeto nunca teve — `pnpm check` só faz type-check), essa é a única
       verificação possível, igual foi feito no T065c/T065e.
+  - **Segundo achado do D2 (bancada 2026-08-12): os PAINÉIS de controle
+    (Modo/Controles/RAW) piscavam e ficavam inclicáveis.** Bug irmão do
+    anterior, mesma família (estado zerado antes de recarregar), mas nos três
+    componentes que consomem `get_capabilities`. Cada um fazia
+    `caps = null; getCapabilities(serial).then(...)` num `$effect` que
+    depende de `sessionId` — e no Linux TODO giro reinicia a sessão. Zerar
+    `caps` some com o painel inteiro (`{#if caps}` no markup) durante um
+    round-trip até o aparelho que tem janela de retry
+    (`get_capabilities_with_retry`), então cada giro apagava os controles por
+    centenas de ms. Agravante: os três painéis pediam em paralelo o MESMO
+    serial, e do lado Rust `get_capabilities` segura o lock de
+    `state.sessions` durante o round-trip — as três chamadas serializavam.
+    - Corrigido: os três param de zerar `caps` (os valores anteriores ficam
+      na tela até chegar o novo) e ganharam guard `capsLoadedFor` — `let`
+      cru, não `$state`, senão viraria dependência do efeito que a escreve.
+    - Corrigido: `api.ts::getCapabilities` compartilha a chamada EM VOO por
+      serial (3 round-trips viram 1). Só o pedido pendente é compartilhado,
+      nada é cacheado entre chamadas — `switch_camera` troca a câmera aberta
+      e com ela `iso_range`/`wb_modes`, que são características dela.
+    - Débito relacionado (não corrigido): recarregar capabilities a cada
+      restart é conservador demais. Só `switch_camera` pode mudar o
+      resultado; giro/espelho não. Dá pra recarregar só nesse caso, mas
+      exige distinguir os dois no frontend — hoje ambos chegam como
+      `session_replaced`/`onSessionChanged` indistinguíveis.
 
 - **`run_preview_pipeline` não tem timeout no snapshot** (achado durante o
   D1, 2026-08-11 — bug independente do item acima, e barato de corrigir).
