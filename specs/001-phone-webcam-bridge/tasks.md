@@ -394,11 +394,13 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
     - As duas partes são necessárias: a identidade estável evita o remount
       (que zeraria o estado de qualquer jeito) e o `$effect` conservador
       evita o blank na troca de prop.
-    - **Falta validar em bancada** que não sobrou um terceiro caminho: se o
-      preview piscar SEM giro/troca de câmera/parar-iniciar, o mecanismo é
-      outro e o D2 não está fechado. Sem runner de teste no frontend (o
-      projeto nunca teve — `pnpm check` só faz type-check), essa é a única
-      verificação possível, igual foi feito no T065c/T065e.
+    - **Validado em bancada pelo usuário (2026-08-12): o preview parou de
+      voltar ao placeholder.** Sem runner de teste no frontend (o projeto
+      nunca teve — `pnpm check` só faz type-check), bancada é a única
+      verificação possível, igual foi feito no T065c/T065e. Se o piscar
+      reaparecer SEM giro/troca de câmera/parar-iniciar, é um terceiro
+      gatilho ainda não identificado — nesse caso instrumentar o `$effect`
+      do `Preview` e o handler de `onSessionState` é o próximo passo.
   - **Segundo achado do D2 (bancada 2026-08-12): os PAINÉIS de controle
     (Modo/Controles/RAW) piscavam e ficavam inclicáveis.** Bug irmão do
     anterior, mesma família (estado zerado antes de recarregar), mas nos três
@@ -418,6 +420,8 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
       serial (3 round-trips viram 1). Só o pedido pendente é compartilhado,
       nada é cacheado entre chamadas — `switch_camera` troca a câmera aberta
       e com ela `iso_range`/`wb_modes`, que são características dela.
+    - **Validado em bancada pelo usuário (2026-08-12): os painéis pararam de
+      sumir e os controles voltaram a responder.**
     - Débito relacionado (não corrigido): recarregar capabilities a cada
       restart é conservador demais. Só `switch_camera` pode mudar o
       resultado; giro/espelho não. Dá pra recarregar só nesse caso, mas
