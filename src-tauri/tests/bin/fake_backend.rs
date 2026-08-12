@@ -6,14 +6,14 @@
 //! usaria para o adb/scrcpy reais):
 //!
 //! - `FAKE_BACKEND_MODE`: `stay_alive` (default) | `crash_once` | `stderr_error`
-//!   | `fail_then_succeed`
+//!   | `fail_then_succeed` | `hang`
 //! - `FAKE_BACKEND_MARKER_FILE`: usado em `crash_once` e `fail_then_succeed`,
 //!   para diferenciar a primeira tentativa de uma retentativa — simula
 //!   "crash → Reconnecting → retomada" (`crash_once`, fica de pé depois) ou
 //!   uma fonte RTSP que só fica pronta depois de N tentativas
 //!   (`fail_then_succeed`, sai rápido em vez de ficar de pé — usado em
 //!   `probe_url_with_retry`, que espera o processo TERMINAR, não continuar
-//!   rodando).
+//!   rodando). Em `hang`, recebe o PID do próprio fake.
 //! - `FAKE_BACKEND_STDERR_LINE`: usado só em `stderr_error`, texto a emitir.
 //! - `FAKE_BACKEND_FAIL_COUNT`: usado só em `fail_then_succeed`, quantas
 //!   tentativas falham antes da que sai com sucesso (default 1).
@@ -62,6 +62,18 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|_| "error: device unauthorized".to_string());
             eprintln!("{line}");
             ExitCode::FAILURE
+        }
+        // Trava pra sempre sem produzir nada no stdout — reproduz o ffmpeg de
+        // preview que abre o device v4l2 mas nunca recebe frame (achado no D1,
+        // 2026-08-11: um órfão desses ficou 1h55m segurando /dev/video8).
+        // Grava o próprio PID no marker pra o teste conseguir provar que o
+        // processo foi MORTO no timeout, não só abandonado.
+        "hang" => {
+            if let Ok(marker) = env::var("FAKE_BACKEND_MARKER_FILE") {
+                let _ = std::fs::write(&marker, std::process::id().to_string());
+            }
+            stay_alive();
+            ExitCode::SUCCESS
         }
         "fail_then_succeed" => {
             let marker = env::var("FAKE_BACKEND_MARKER_FILE")

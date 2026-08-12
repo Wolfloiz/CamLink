@@ -1030,6 +1030,10 @@ async fn maybe_spawn_video_pipeline(
     {
         if let Some(sink) = video_sink {
             let ffmpeg_path = paths.ffmpeg.clone();
+            // Todo subprocesso deste módulo repassa `extra_env` (binários fake
+            // dos testes, research.md R11); o preview era o único que não
+            // repassava.
+            let extra_env = paths.extra_env.clone();
             let device = virtual_camera_target.to_string();
             let resolution = if orientation.0.swaps_dimensions() {
                 (config.resolution.1, config.resolution.0)
@@ -1038,7 +1042,7 @@ async fn maybe_spawn_video_pipeline(
             };
             let sink = Arc::clone(sink);
             let handle = tokio::spawn(async move {
-                run_preview_pipeline(ffmpeg_path, device, resolution, sink).await;
+                run_preview_pipeline(ffmpeg_path, extra_env, device, resolution, sink).await;
             });
             control.replace_video_pipeline(handle).await;
         }
@@ -1051,6 +1055,63 @@ async fn maybe_spawn_video_pipeline(
 #[cfg(target_os = "linux")]
 const PREVIEW_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(200);
 
+/// Teto de UM snapshot. Sem isso o `read_exact` abaixo fica pendurado pra
+/// SEMPRE quando o ffmpeg abre o device mas o frame nunca chega: a task de
+/// preview morre em definitivo (não é só um snapshot pulado — nunca mais
+/// tenta) e o processo segue segurando o slot único de leitura do device,
+/// o que ainda faz o `v4l2loopback-ctl delete` do `purge_all` falhar com
+/// EBUSY e deixar câmera fantasma no OBS. Achado no diagnóstico D1
+/// (2026-08-11): um `ffmpeg -frames:v 1` órfão travado há 1h55m em
+/// `/dev/video8`, sem writer nenhum no device.
+#[cfg(target_os = "linux")]
+pub const PREVIEW_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Captura UM frame RGBA do lado de captura do device v4l2loopback.
+///
+/// `Err` cobre os três casos normais e é sempre descartável: o consumidor
+/// real está com o slot (EBUSY), o writer ainda não conectou, ou o frame
+/// não chegou dentro de `timeout`. Em qualquer saída o processo é
+/// derrubado — por `kill_on_drop`, que manda SIGKILL, e não por um kill
+/// gracioso: um ffmpeg bloqueado dentro do v4l2 **ignora SIGTERM**
+/// (reproduzido 3x no D1).
+#[cfg(target_os = "linux")]
+pub async fn capture_preview_snapshot(
+    ffmpeg_path: &std::path::Path,
+    extra_env: &[(String, String)],
+    device: &str,
+    resolution: (u32, u32),
+    buf: &mut [u8],
+    timeout: Duration,
+) -> Result<(), String> {
+    use tokio::io::AsyncReadExt;
+
+    let attempt = async {
+        let mut ffmpeg = Command::new(ffmpeg_path)
+            .args(build_v4l2_preview_args(device, resolution))
+            .envs(extra_env.iter().cloned())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("falha ao iniciar ffmpeg do preview: {e}"))?;
+        let mut stdout = ffmpeg
+            .stdout
+            .take()
+            .ok_or_else(|| "stdout do ffmpeg de preview indisponível".to_string())?;
+        let read = stdout.read_exact(buf).await;
+        let _ = ffmpeg.wait().await;
+        read.map(|_| ()).map_err(|e| format!("sem frame: {e}"))
+    };
+
+    // No caminho de timeout, `attempt` é dropado aqui — junto com o `Child`,
+    // que é o que dispara o SIGKILL do `kill_on_drop`.
+    match tokio::time::timeout(timeout, attempt).await {
+        Ok(result) => result,
+        Err(_) => Err(format!("sem frame em {}s", timeout.as_secs_f32())),
+    }
+}
+
 /// Tira snapshots RGBA do lado de captura do device v4l2loopback e entrega
 /// ao `FrameSink` (Linux). Cada snapshot abre o device, lê UM frame e fecha
 /// (`build_v4l2_preview_args`): o v4l2loopback só admite um leitor
@@ -1062,36 +1123,26 @@ const PREVIEW_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(200);
 #[cfg(target_os = "linux")]
 pub(crate) async fn run_preview_pipeline(
     ffmpeg_path: PathBuf,
+    extra_env: Vec<(String, String)>,
     device: String,
     resolution: (u32, u32),
     sink: FrameSink,
 ) {
-    use tokio::io::AsyncReadExt;
-
     // Mesma fonte de verdade do `scale=` nos args do ffmpeg — se divergisse,
-    // o `read_exact` abaixo desalinharia em silêncio.
+    // o `read_exact` desalinharia em silêncio.
     let (w, h) = crate::preview::preview_dimensions(resolution);
     let frame_bytes = w as usize * h as usize * 4;
     let mut buf = vec![0u8; frame_bytes];
     let mut had_frame = false;
     loop {
-        let snapshot: Result<(), String> = async {
-            let mut ffmpeg = Command::new(&ffmpeg_path)
-                .args(build_v4l2_preview_args(&device, resolution))
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|e| format!("falha ao iniciar ffmpeg do preview: {e}"))?;
-            let mut stdout = ffmpeg
-                .stdout
-                .take()
-                .ok_or_else(|| "stdout do ffmpeg de preview indisponível".to_string())?;
-            let read = stdout.read_exact(&mut buf).await;
-            let _ = ffmpeg.wait().await;
-            read.map(|_| ()).map_err(|e| format!("sem frame: {e}"))
-        }
+        let snapshot = capture_preview_snapshot(
+            &ffmpeg_path,
+            &extra_env,
+            &device,
+            resolution,
+            &mut buf,
+            PREVIEW_SNAPSHOT_TIMEOUT,
+        )
         .await;
 
         match snapshot {

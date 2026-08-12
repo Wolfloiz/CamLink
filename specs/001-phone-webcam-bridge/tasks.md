@@ -349,6 +349,53 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
   precisando de F5 no Linux (item abaixo), já que passaria a aplicar
   `frame_transform` ao vivo como o Windows faz, em vez de reiniciar o
   cliente scrcpy via `--capture-orientation`.
+  - **Diagnóstico D1 em bancada (2026-08-11)** — a premissa do read-back foi
+    testada de verdade, fora do app, com writer sintético + leitores
+    concorrentes nos devices ociosos (`/dev/video2-4`), porque duas coisas
+    sugeriam que o limite podia não ser real:
+    `/sys/module/v4l2loopback/parameters/max_openers = 10` e o fato de
+    `exclusive_caps` controlar quais *capabilities* o device anuncia
+    (research.md R3), não a contagem de leitores. **Resultado: o limite é
+    real e a conclusão original está certa.** Com um leitor streamando, o
+    segundo recebe `Error opening input: Device or resource busy` — falha no
+    `open()`, não no `VIDIOC_S_FMT`, então fixar `-input_format`/`-video_size`
+    (hipótese de conflito de formato) **não** ajuda: testado, mesmo EBUSY.
+    Controle em `/dev/video3` (`exclusive_caps=0`) dá o MESMO EBUSY, ou seja
+    a atribuição a `exclusive_caps` em `stream_manager.rs:252` é imprecisa —
+    é limitação do v4l2loopback 0.15.3 em si (um leitor streamando por vez),
+    independente desse parâmetro. **Conclusão: não existe fix barato do lado
+    do backend; enquanto o Android/Linux usar `--v4l2-sink`, o preview não
+    tem como coexistir com um consumidor real. O port continua sendo o único
+    caminho pro read-back.**
+
+- **`run_preview_pipeline` não tem timeout no snapshot** (achado durante o
+  D1, 2026-08-11 — bug independente do item acima, e barato de corrigir).
+  `stream_manager.rs:1078-1095` faz `stdout.read_exact(&mut buf).await`
+  seguido de `ffmpeg.wait().await` sem nenhum timeout: se o ffmpeg abre o
+  device mas o frame nunca chega, a task fica pendurada pra sempre — o
+  preview daquela sessão morre em definitivo (não volta mais) E o processo
+  segue segurando o slot do device. **Evidência direta**: um `ffmpeg
+  -frames:v 1` órfão de uma sessão anterior foi encontrado travado em
+  `/dev/video8` por **1h55m** (confirmado com `ps -o etime`), sem writer
+  nenhum no device. Piora dois sintomas: (a) explica o preview ficar preso
+  no placeholder em vez de só engasgar; (b) um device segurado assim faz o
+  `v4l2loopback-ctl delete` do `purge_all` (T065d) falhar com EBUSY, deixando
+  device fantasma no OBS. Agrava também que esses `ffmpeg` **ignoram
+  SIGTERM** quando bloqueados no v4l2 (reproduzido 3x no D1: só morrem com
+  SIGKILL) — `kill_on_drop`/`child.kill()` do tokio manda SIGKILL, então o
+  fix é envolver o snapshot num `tokio::time::timeout` e dropar o child.
+  - **Corrigido (2026-08-11, TDD)**: snapshot extraído pra
+    `stream_manager::capture_preview_snapshot`, com `PREVIEW_SNAPSHOT_TIMEOUT
+    = 3s`; no caminho de timeout o futuro é dropado junto com o `Child`, o
+    que dispara o SIGKILL do `kill_on_drop` (SIGTERM não serve, ver acima).
+    `run_preview_pipeline` passou a só orquestrar o loop. Aproveitado pra
+    corrigir uma inconsistência: era o ÚNICO subprocesso do módulo que não
+    repassava `extra_env` (research.md R11) — agora repassa, o que também
+    tornou o teste determinístico (sem `set_var` global, que dava corrida
+    entre testes paralelos no mesmo processo).
+  - Testes: `tests/preview_snapshot_test.rs` (2 casos — desiste no timeout,
+    e MATA o processo ao desistir, provado lendo o PID que o fake grava e
+    conferindo `/proc/<pid>`), com modo `hang` novo no `fake_backend`.
 
 - Bug de giro/espelho no Linux exigindo F5 no Meet/Chrome (não bloqueia
   fases atuais, documentado em
