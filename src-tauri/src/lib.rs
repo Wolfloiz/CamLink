@@ -57,8 +57,9 @@ const SESSION_STATE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// (`preview_dimensions`, ≤640 px) e o encode roda fora do hot path
 /// (`spawn_preview_encoder`).
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(200);
-const VIRTUAL_CAMERA_LABEL: &str = "CamLink Android";
-const RTSP_CAMERA_LABEL: &str = "CamLink IP";
+// O prefixo comum dos labels vive em `virtualcam::LABEL_PREFIX` (a limpeza
+// de devices órfãos precisa saber quais labels são deste app); o resto do
+// label é montado por `virtualcam::vcam_label` a partir de (nome, sufixo).
 /// Resolução/fps de saída das sessões RTSP (v1): o ffmpeg redimensiona o
 /// stream da câmera IP para casar com o device virtual.
 const RTSP_RESOLUTION: (u32, u32) = (1280, 720);
@@ -480,16 +481,16 @@ async fn start_stream(
     virtualcam::check_capacity(active_source_count(&state).await)?;
 
     // T065c/T065e: nome amigável no seletor do OBS — apelido do usuário se
-    // houver ("Câmera lateral (BCDE)"), senão modelo do aparelho ("SM-N970F
-    // (BCDE)"), senão o serial cru se o device ainda não estiver no cache
-    // de descoberta.
+    // houver ("CamLink câmera teto P11P"), senão modelo do aparelho
+    // ("CamLink SM_S921B P11P"), senão só o serial se o device ainda não
+    // estiver no cache de descoberta.
     let nickname = device_nickname_for(&serial);
-    let discriminator = virtualcam::android_label_discriminator(
+    let (name, suffix) = virtualcam::android_label_parts(
         &state.devices.lock().unwrap(),
         &serial,
         nickname.as_deref(),
     );
-    let label = virtualcam::vcam_label(VIRTUAL_CAMERA_LABEL, &discriminator);
+    let label = virtualcam::vcam_label(&name, &suffix);
     let virtual_camera = {
         let mut vcam = state.vcam.lock().unwrap();
         vcam.create(&label, config.resolution, config.fps)
@@ -1087,10 +1088,10 @@ async fn restart_android_session(
     };
 
     let can_reuse = cfg!(target_os = "linux") && !force_fresh_vcam;
-    // T065c/T065e: mesmo discriminador amigável de `start_stream` — precisa
-    // ser resolvido fora do lock de `vcam` (mutex distinto de `devices`).
+    // T065c/T065e: mesmo nome amigável de `start_stream` — precisa ser
+    // resolvido fora do lock de `vcam` (mutex distinto de `devices`).
     let nickname = device_nickname_for(&serial);
-    let discriminator = virtualcam::android_label_discriminator(
+    let (name, suffix) = virtualcam::android_label_parts(
         &state.devices.lock().unwrap(),
         &serial,
         nickname.as_deref(),
@@ -1105,7 +1106,7 @@ async fn restart_android_session(
             Some(cam) if can_reuse => cam,
             _ => {
                 let _ = vcam.destroy(&vcam_id);
-                let label = virtualcam::vcam_label(VIRTUAL_CAMERA_LABEL, &discriminator);
+                let label = virtualcam::vcam_label(&name, &suffix);
                 if cfg!(target_os = "linux") && force_fresh_vcam {
                     vcam.create_fresh(&label, output_dims, config.fps)
                 } else {
@@ -1556,9 +1557,9 @@ async fn start_rtsp(
     .await?;
 
     // T065c: nome amigável no seletor do OBS (o nome que o usuário deu à
-    // fonte, ex. "Câmera do portão") em vez do Uuid cru.
-    let discriminator = virtualcam::rtsp_label_discriminator(&source.name, &id);
-    let label = virtualcam::vcam_label(RTSP_CAMERA_LABEL, &discriminator);
+    // fonte, ex. "CamLink câmera do portão a1b2") em vez do Uuid cru.
+    let (name, suffix) = virtualcam::rtsp_label_parts(&source.name, &id);
+    let label = virtualcam::vcam_label(&name, &suffix);
     let virtual_camera = {
         let mut vcam = state.vcam.lock().unwrap();
         vcam.create(&label, RTSP_RESOLUTION, RTSP_FPS)

@@ -397,6 +397,31 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
     e MATA o processo ao desistir, provado lendo o PID que o fake grava e
     conferindo `/proc/<pid>`), com modo `hang` novo no `fake_backend`.
 
+- **Truncamento do label corta no meio da estrutura** (visível nos devices
+  acima): `MAX_LABEL_LEN = 31` corta cru, produzindo
+  `CamLink Android (SM_S921B (P11P` e `CamLink Android (camera para o ` —
+  parêntese aberto sem fechar e nome cortado no meio, exatamente no seletor
+  do OBS que o T065c/T065e queriam deixar legível. O orçamento de 31 chars
+  é gasto pelo prefixo fixo `CamLink Android (` (17 chars), sobrando 14 pro
+  nome+sufixo. **Pior que feio: o corte podia comer o próprio sufixo de
+  unicidade**, e o sufixo é a chave que impede duas fontes de roubarem o
+  device uma da outra (`find_reusable_device`, bug do T062).
+  - **Corrigido (2026-08-11, TDD)**, formato escolhido pelo usuário:
+    `CamLink {nome} {sufixo}` (ex.: `CamLink camera teto P11P`,
+    `CamLink SM_S921B P11P`, `CamLink teste-1 2469`). Tirar o
+    `Android`/`IP` do meio libera 8-10 chars: o orçamento do nome foi de 8
+    pra **18** chars, e o `CamLink` na frente mantém as fontes agrupadas na
+    lista do OBS.
+  - `vcam_label(name, suffix)` agora recebe as duas partes separadas e
+    trunca SÓ o nome, nunca o sufixo — antes recebia a string já composta,
+    o que tornava impossível proteger o sufixo. `android_label_discriminator`
+    /`rtsp_label_discriminator` viraram `android_label_parts`/
+    `rtsp_label_parts`, devolvendo `(nome, sufixo)`.
+  - Teste dedicado pro risco de colisão
+    (`vcam_label_keeps_the_whole_suffix_even_when_the_name_is_truncated`):
+    dois nomes longos IGUAIS com sufixos diferentes têm que continuar
+    gerando labels diferentes.
+
 - Bug de giro/espelho no Linux exigindo F5 no Meet/Chrome (não bloqueia
   fases atuais, documentado em
   `README.md` § Limitações conhecidas) — reproduzido em 2 aparelhos

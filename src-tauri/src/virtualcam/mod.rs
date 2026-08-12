@@ -21,6 +21,15 @@ use crate::model::{AndroidDevice, VirtualCamera, VirtualCameraState};
 /// plan.md "Scale/Scope").
 pub const MAX_CONCURRENT_SOURCES: usize = 4;
 
+/// Prefixo comum a TODO label criado por este app. É a única ligação entre
+/// "o que o app cria" e "o que o app tem direito de apagar" na limpeza de
+/// devices órfãos (`v4l2::orphan_devices`), e também o que agrupa as fontes
+/// do CamLink na lista do OBS. Coberto pelos testes
+/// `vcam_label_always_starts_with_the_prefix` (aqui) e
+/// `labels_created_by_this_app_are_recognized_as_its_own_orphans`
+/// (`tests/v4l2_test.rs`), que fecham o ciclo cria→reconhece.
+pub const LABEL_PREFIX: &str = "CamLink";
+
 /// Gate de capacidade chamado por `start_stream`/`start_rtsp` (lib.rs) antes
 /// de criar qualquer recurso (vcam/processo) para a nova fonte — nunca deixa
 /// uma 5ª fonte nascer parcialmente alocada.
@@ -56,16 +65,33 @@ pub fn sanitize_label(raw: &str, max_len: usize) -> String {
         .collect()
 }
 
-/// Label por-fonte usado na criação do device virtual: cada fonte
-/// concorrente (serial do Android, id da fonte RTSP) precisa de um label
-/// distinto, senão `find_reusable_device` (v4l2.rs) reaproveita/rouba o
-/// device de uma sessão irmã ainda viva. O reuso continua estável ENTRE
-/// restarts da MESMA fonte lógica porque o discriminador (serial/id) não
-/// muda entre chamadas para a mesma fonte. Sempre sanitizado/cortado em
-/// `MAX_LABEL_LEN` (T065c) — discriminadores digitados livremente (nome de
-/// fonte RTSP) não podem estourar o limite do device virtual.
-pub fn vcam_label(base: &str, discriminator: &str) -> String {
-    sanitize_label(&format!("{base} ({discriminator})"), MAX_LABEL_LEN)
+/// Label do device virtual: `"CamLink {name} {suffix}"` — o que o usuário vê
+/// no seletor de câmera do OBS.
+///
+/// `suffix` é a CHAVE de unicidade: `find_reusable_device` (v4l2.rs) casa o
+/// label inteiro, então duas fontes concorrentes com labels iguais roubam o
+/// device uma da outra (bug do T062). Por isso ele **nunca** é truncado — só
+/// o `name` é cortado pra caber em `MAX_LABEL_LEN`. A versão anterior
+/// truncava a string composta inteira, o que podia comer o sufixo e ainda
+/// deixava parêntese aberto (visto em bancada 2026-08-11:
+/// `CamLink Android (SM_S921B (P11P` e `CamLink Android (camera para o `).
+///
+/// O orçamento sobrante pro nome é 18 chars com o sufixo típico de 4
+/// (`31 - "CamLink" - 2 espaços - 4`). O reuso entre restarts da MESMA fonte
+/// lógica continua estável porque nome e sufixo não mudam entre chamadas.
+pub fn vcam_label(name: &str, suffix: &str) -> String {
+    let suffix = sanitize_label(suffix, MAX_LABEL_LEN);
+    // "CamLink" + espaço antes do nome + espaço antes do sufixo + sufixo.
+    let fixed = LABEL_PREFIX.chars().count() + 2 + suffix.chars().count();
+    let name = sanitize_label(name, MAX_LABEL_LEN.saturating_sub(fixed));
+    let composed = if name.is_empty() {
+        format!("{LABEL_PREFIX} {suffix}")
+    } else {
+        format!("{LABEL_PREFIX} {name} {suffix}")
+    };
+    // Rede de segurança pra um sufixo absurdamente longo (nenhum chamador
+    // gera isso hoje — todos usam 4 chars).
+    sanitize_label(&composed, MAX_LABEL_LEN)
 }
 
 /// Últimos 4 chars do serial — sufixo curto de desambiguação reaproveitado
@@ -76,53 +102,47 @@ fn serial_suffix(serial: &str) -> String {
     chars[start..].iter().collect()
 }
 
-/// Discriminador amigável de fonte Android (T065c/T065e): prioriza o
-/// apelido definido pelo usuário (`nickname`, ex. "Câmera lateral" — o
-/// `model` do adb costuma ser só o nome de código comercial, tipo
-/// "SM-S921B", não o nome de marketing "Galaxy S24"; o app não tem como
-/// saber esse mapeamento, então deixar o usuário nomear é o caminho). Sem
-/// apelido, cai pro modelo do aparelho (`AndroidDevice.model`, cacheado em
-/// `AppState.devices` desde a última descoberta via `adb devices -l`) em
-/// vez do serial cru. Em ambos os casos leva um sufixo do próprio serial
-/// pra continuar único mesmo com 2 aparelhos do MESMO modelo/apelido
-/// plugados ao mesmo tempo (ex.: `"Câmera lateral (2ABC)"`,
-/// `"SM-N970F (2ABC)"`) — o discriminador também é a chave de unicidade do
-/// device virtual (`find_reusable_device`). Se o device ainda não estiver
-/// na lista cacheada (corrida rara entre descoberta e start) ou o modelo
-/// vier vazio, cai pro serial puro — nunca falha, só fica menos amigável.
-pub fn android_label_discriminator(
+/// `(nome, sufixo)` de uma fonte Android para `vcam_label` (T065c/T065e).
+///
+/// O nome prioriza o apelido dado pelo usuário (`nickname`, ex. "câmera
+/// teto") — o `model` do adb costuma ser só o nome de código comercial
+/// ("SM_S921B"), não o de marketing ("Galaxy S24"), e o app não tem como
+/// saber esse mapeamento sozinho. Sem apelido, cai pro modelo
+/// (`AndroidDevice.model`, cacheado em `AppState.devices` desde a última
+/// descoberta via `adb devices -l`).
+///
+/// O sufixo são os 4 últimos chars do serial, o que mantém devices
+/// distintos mesmo com 2 aparelhos do MESMO modelo/apelido plugados juntos
+/// (ex.: `CamLink câmera teto P11P` vs `CamLink câmera teto 3D5B`).
+pub fn android_label_parts(
     devices: &[AndroidDevice],
     serial: &str,
     nickname: Option<&str>,
-) -> String {
+) -> (String, String) {
+    let suffix = serial_suffix(serial);
     if let Some(nickname) = nickname.map(str::trim).filter(|n| !n.is_empty()) {
-        return format!("{nickname} ({})", serial_suffix(serial));
+        return (nickname.to_string(), suffix);
     }
     match devices.iter().find(|d| d.serial == serial) {
-        Some(d) if !d.model.trim().is_empty() => {
-            format!("{} ({})", d.model.trim(), serial_suffix(serial))
-        }
-        _ => serial.to_string(),
+        Some(d) if !d.model.trim().is_empty() => (d.model.trim().to_string(), suffix),
+        // Sem nome nenhum pra mostrar: o serial inteiro vira o sufixo, que
+        // continua garantindo unicidade (só fica menos amigável).
+        _ => (String::new(), serial.to_string()),
     }
 }
 
-/// Discriminador amigável de fonte RTSP (T065c): usa o nome que o próprio
-/// usuário deu à fonte (`RtspSource.name`, ex. "Câmera do portão") em vez
-/// do `Uuid` cru. Sempre leva um sufixo curto do `id` — mesmo que o nome
-/// seja único hoje, nada impede o usuário de cadastrar duas fontes com o
-/// mesmo nome, e o discriminador também é a chave de unicidade do device
-/// virtual (`find_reusable_device`); sem o sufixo, a 2ª fonte roubaria o
-/// device da 1ª (o mesmo bug corrigido no T062 pra Android). Nome vazio
-/// (não deveria acontecer — `RtspPanel.svelte` exige preenchido — mas sem
-/// custo cobrir) cai pro `id` puro.
-pub fn rtsp_label_discriminator(name: &str, id: &Uuid) -> String {
-    let name = name.trim();
+/// `(nome, sufixo)` de uma fonte RTSP para `vcam_label` (T065c).
+///
+/// O nome é o que o próprio usuário deu à fonte (`RtspSource.name`, ex.
+/// "câmera do portão"). O sufixo vem do `id` e é obrigatório mesmo com nome
+/// único: nada impede cadastrar duas fontes com o mesmo nome, e o label
+/// inteiro é a chave de unicidade do device (`find_reusable_device`) — sem
+/// o sufixo a 2ª fonte roubaria o device da 1ª (bug do T062). Nome vazio
+/// (`RtspPanel.svelte` exige preenchido, mas cobrir é de graça) resulta em
+/// `CamLink {sufixo}`, ainda único.
+pub fn rtsp_label_parts(name: &str, id: &Uuid) -> (String, String) {
     let suffix: String = id.simple().to_string().chars().take(4).collect();
-    if name.is_empty() {
-        id.to_string()
-    } else {
-        format!("{name} #{suffix}")
-    }
+    (name.trim().to_string(), suffix)
 }
 
 /// Falha do backend de câmera virtual.
@@ -394,122 +414,153 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // vcam_label — nunca estoura MAX_LABEL_LEN (T065c), mesmo com um
-    // discriminador digitado livremente (nome de fonte RTSP).
+    // vcam_label — cabe em MAX_LABEL_LEN sem NUNCA comer o sufixo de
+    // unicidade nem deixar pontuação pela metade (achado em bancada
+    // 2026-08-11: `CamLink Android (SM_S921B (P11P`).
     // -----------------------------------------------------------------
 
     #[test]
     fn vcam_label_never_exceeds_max_label_len() {
         let long_name = "Câmera de segurança da entrada principal do galpão 2";
-        let label = vcam_label("CamLink IP", long_name);
-        assert!(label.chars().count() <= MAX_LABEL_LEN);
+        let label = vcam_label(long_name, "a1b2");
+        assert!(label.chars().count() <= MAX_LABEL_LEN, "label: {label:?}");
     }
 
+    /// O sufixo é a chave de unicidade — se o truncamento o comesse, duas
+    /// fontes com nome longo e parecido colidiriam no mesmo device.
     #[test]
-    fn vcam_label_short_inputs_unaffected_by_truncation() {
-        assert_eq!(
-            vcam_label("CamLink Android", "R58M12ABCDE"),
-            "CamLink Android (R58M12ABCDE)"
+    fn vcam_label_keeps_the_whole_suffix_even_when_the_name_is_truncated() {
+        let long_name = "Câmera de segurança da entrada principal do galpão 2";
+        let a = vcam_label(long_name, "a1b2");
+        let b = vcam_label(long_name, "c3d4");
+        assert!(a.ends_with("a1b2"), "sufixo perdido em {a:?}");
+        assert!(b.ends_with("c3d4"), "sufixo perdido em {b:?}");
+        assert_ne!(
+            a, b,
+            "nomes longos iguais não podem colapsar no mesmo label"
         );
     }
 
+    #[test]
+    fn vcam_label_short_inputs_are_untouched() {
+        assert_eq!(
+            vcam_label("camera teto", "P11P"),
+            "CamLink camera teto P11P"
+        );
+        assert_eq!(vcam_label("SM_S921B", "P11P"), "CamLink SM_S921B P11P");
+    }
+
+    #[test]
+    fn vcam_label_without_a_name_is_still_unique() {
+        assert_eq!(vcam_label("", "R58M12ABCDE"), "CamLink R58M12ABCDE");
+    }
+
+    /// Todo label criado aqui precisa casar com o prefixo, senão o device
+    /// vira fantasma permanente (`v4l2::orphan_devices` nunca o limpa).
+    #[test]
+    fn vcam_label_always_starts_with_the_prefix() {
+        for (name, suffix) in [
+            ("camera teto", "P11P"),
+            ("", "a1b2"),
+            ("nome absurdamente longo que estoura o limite", "c3d4"),
+        ] {
+            assert!(vcam_label(name, suffix).starts_with(LABEL_PREFIX));
+        }
+    }
+
     // -----------------------------------------------------------------
-    // android_label_discriminator
+    // android_label_parts
     // -----------------------------------------------------------------
 
     #[test]
-    fn android_label_discriminator_uses_model_and_serial_suffix() {
+    fn android_parts_use_model_and_serial_suffix() {
         let devices = vec![device("R58M12ABCDE", "SM-N970F")];
-        assert_eq!(
-            android_label_discriminator(&devices, "R58M12ABCDE", None),
-            "SM-N970F (BCDE)"
-        );
+        let (name, suffix) = android_label_parts(&devices, "R58M12ABCDE", None);
+        assert_eq!((name.as_str(), suffix.as_str()), ("SM-N970F", "BCDE"));
     }
 
     #[test]
-    fn android_label_discriminator_disambiguates_same_model_different_devices() {
+    fn android_parts_disambiguate_same_model_different_devices() {
         let devices = vec![
             device("R58M12ABCDE", "SM-N970F"),
             device("HT2ABC091234", "SM-N970F"),
         ];
-        let a = android_label_discriminator(&devices, "R58M12ABCDE", None);
-        let b = android_label_discriminator(&devices, "HT2ABC091234", None);
-        assert_ne!(a, b);
-        assert!(a.starts_with("SM-N970F ("));
-        assert!(b.starts_with("SM-N970F ("));
+        let a = android_label_parts(&devices, "R58M12ABCDE", None);
+        let b = android_label_parts(&devices, "HT2ABC091234", None);
+        assert_eq!(a.0, b.0, "mesmo modelo, mesmo nome");
+        assert_ne!(a.1, b.1, "sufixos precisam diferir");
+        assert_ne!(vcam_label(&a.0, &a.1), vcam_label(&b.0, &b.1));
     }
 
     #[test]
-    fn android_label_discriminator_falls_back_to_serial_when_device_unknown() {
+    fn android_parts_fall_back_to_serial_when_device_unknown() {
         let devices: Vec<AndroidDevice> = vec![];
-        assert_eq!(
-            android_label_discriminator(&devices, "R58M12ABCDE", None),
-            "R58M12ABCDE"
-        );
+        let (name, suffix) = android_label_parts(&devices, "R58M12ABCDE", None);
+        assert!(name.is_empty());
+        assert_eq!(suffix, "R58M12ABCDE");
     }
 
     #[test]
-    fn android_label_discriminator_falls_back_to_serial_when_model_is_blank() {
+    fn android_parts_fall_back_to_serial_when_model_is_blank() {
         let devices = vec![device("R58M12ABCDE", "  ")];
-        assert_eq!(
-            android_label_discriminator(&devices, "R58M12ABCDE", None),
-            "R58M12ABCDE"
-        );
+        let (name, suffix) = android_label_parts(&devices, "R58M12ABCDE", None);
+        assert!(name.is_empty());
+        assert_eq!(suffix, "R58M12ABCDE");
     }
 
     #[test]
-    fn android_label_discriminator_prefers_nickname_over_model() {
+    fn android_parts_prefer_nickname_over_model() {
         let devices = vec![device("R58M12ABCDE", "SM-S921B")];
-        assert_eq!(
-            android_label_discriminator(&devices, "R58M12ABCDE", Some("Câmera lateral")),
-            "Câmera lateral (BCDE)"
-        );
+        let (name, suffix) = android_label_parts(&devices, "R58M12ABCDE", Some("Câmera lateral"));
+        assert_eq!((name.as_str(), suffix.as_str()), ("Câmera lateral", "BCDE"));
     }
 
     #[test]
-    fn android_label_discriminator_nickname_disambiguates_same_nickname_different_devices() {
+    fn android_parts_nickname_disambiguates_same_nickname_different_devices() {
         let devices = vec![
             device("R58M12ABCDE", "SM-S921B"),
             device("HT2ABC091234", "SM-S921B"),
         ];
-        let a = android_label_discriminator(&devices, "R58M12ABCDE", Some("Câmera lateral"));
-        let b = android_label_discriminator(&devices, "HT2ABC091234", Some("Câmera lateral"));
-        assert_ne!(a, b);
+        let a = android_label_parts(&devices, "R58M12ABCDE", Some("Câmera lateral"));
+        let b = android_label_parts(&devices, "HT2ABC091234", Some("Câmera lateral"));
+        assert_ne!(vcam_label(&a.0, &a.1), vcam_label(&b.0, &b.1));
     }
 
     #[test]
-    fn android_label_discriminator_blank_nickname_falls_back_to_model() {
+    fn android_parts_blank_nickname_falls_back_to_model() {
         let devices = vec![device("R58M12ABCDE", "SM-S921B")];
+        let (name, suffix) = android_label_parts(&devices, "R58M12ABCDE", Some("   "));
+        assert_eq!((name.as_str(), suffix.as_str()), ("SM-S921B", "BCDE"));
+    }
+
+    // -----------------------------------------------------------------
+    // rtsp_label_parts
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn rtsp_parts_use_the_user_given_name() {
+        let id = Uuid::new_v4();
+        let (name, suffix) = rtsp_label_parts("Câmera do portão", &id);
+        assert_eq!(name, "Câmera do portão");
+        assert_eq!(suffix.chars().count(), 4);
+    }
+
+    #[test]
+    fn rtsp_parts_disambiguate_sources_with_the_same_name() {
+        let (id_a, id_b) = (Uuid::new_v4(), Uuid::new_v4());
+        let a = rtsp_label_parts("Câmera", &id_a);
+        let b = rtsp_label_parts("Câmera", &id_b);
+        assert_ne!(vcam_label(&a.0, &a.1), vcam_label(&b.0, &b.1));
+    }
+
+    #[test]
+    fn rtsp_parts_with_blank_name_still_produce_a_unique_label() {
+        let id = Uuid::new_v4();
+        let (name, suffix) = rtsp_label_parts("   ", &id);
+        assert!(name.is_empty());
         assert_eq!(
-            android_label_discriminator(&devices, "R58M12ABCDE", Some("   ")),
-            "SM-S921B (BCDE)"
+            vcam_label(&name, &suffix),
+            format!("{LABEL_PREFIX} {suffix}")
         );
-    }
-
-    // -----------------------------------------------------------------
-    // rtsp_label_discriminator
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn rtsp_label_discriminator_uses_the_user_given_name() {
-        let id = Uuid::new_v4();
-        let discriminator = rtsp_label_discriminator("Câmera do portão", &id);
-        assert!(discriminator.starts_with("Câmera do portão #"));
-    }
-
-    #[test]
-    fn rtsp_label_discriminator_disambiguates_sources_with_the_same_name() {
-        let id_a = Uuid::new_v4();
-        let id_b = Uuid::new_v4();
-        assert_ne!(
-            rtsp_label_discriminator("Câmera", &id_a),
-            rtsp_label_discriminator("Câmera", &id_b)
-        );
-    }
-
-    #[test]
-    fn rtsp_label_discriminator_falls_back_to_id_when_name_is_blank() {
-        let id = Uuid::new_v4();
-        assert_eq!(rtsp_label_discriminator("   ", &id), id.to_string());
     }
 }
