@@ -178,7 +178,7 @@ do fork, Java), `installer/{linux,windows}/`.
 - [x] T051 [US4] Implementar `src-tauri/src/rtsp_manager.rs`: subprocess ffmpeg (Linux `-f v4l2`; Windows rawvideo→`feed_frame`), lifecycle com standby/reconexão, erros de auth/host acionáveis; emitir `preview_frame` 1 fps também para sessões RTSP nas duas plataformas (Linux: leitura do device virtual; Windows: tap no pipe rawvideo — FR-023)
 - [x] T052 [US4] Comandos Tauri `add_rtsp_source`/`remove_rtsp_source` (senha→keyring; remoção limpa o segredo), `start_rtsp`/`stop_rtsp` em `src-tauri/src/lib.rs`
 - [x] T053 [P] [US4] Frontend: `src/lib/RtspPanel.svelte` (nome/URL/senha, status, remover)
-- [ ] T054 [US4] Validação manual: quickstart Cenário 4 (mediamtx simulado + câmera real; latência ≤ 300 ms; senha ausente do arquivo de config) — **parcialmente validado (2026-08-03)**: fonte conecta (após corrigir a convenção de credencial na URL), latência ok, senha nunca aparece no `config.toml`, senha errada dá erro claro. **Bloqueado**: reconexão automática após queda da fonte não se autorrecupera de forma confiável — ver bug em "Débito técnico" abaixo. Fechar só depois desse bug resolvido.
+- [x] T054 [US4] Validação manual: quickstart Cenário 4 (mediamtx simulado + câmera real; latência ≤ 300 ms; senha ausente do arquivo de config) — **parcialmente validado (2026-08-03)**: fonte conecta (após corrigir a convenção de credencial na URL), latência ok, senha nunca aparece no `config.toml`, senha errada dá erro claro. **Fechado (2026-08-19)**: reconexão validada em bancada no Windows com fonte real (app IP Webcam via Android, câmera Raspberry Pi cogitada mas não precisou) — dois bugs de reconexão achados e corrigidos nesta sessão (ver "Débito técnico"): (1) cold start do probe já corrigido antes (`probe_url_with_retry`, confirmado funcionando pelas 3 tentativas completas no log); (2) queda no meio do stream não se recuperava sozinha — causa real era `-timeout` ausente no ffmpeg (default = espera infinita), corrigido com `SOCKET_IO_TIMEOUT_US = 10s`. De brinde, achado e corrigido um 3º bug não relacionado à reconexão: `probesize`/`analyzeduration` mínimos (0/32) faziam o ffmpeg nunca identificar vídeo de fontes sem `sprop-parameter-sets` no SDP (relaxado para 100ms/64KB).
 
 **Checkpoint**: US4 funcional e independente (só requer Phase 2)
 
@@ -645,9 +645,35 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
     sai rápido em vez de ficar de pé, diferente do `crash_once` existente)
     + 2 testes novos em `rtsp_test.rs` cobrindo "sucede assim que a fonte
     fica pronta" e "desiste depois de `max_attempts`".
-  - **Não verificado ainda**: bancada com câmera IP real (só testado com o
-    setup de mediamtx+ffmpeg desta sessão) — uma câmera real pode levar bem
-    mais que 3×3s pra ligar de vez.
+  - **Validado em bancada (2026-08-19, Windows) com fonte real** (app IP
+    Webcam via Android, rede doméstica — não loopback): cold start confirmado
+    ok, o retry de 3 tentativas realmente roda (log com `attempt=1/2/3` e
+    `elapsed≈3s` cada, adicionado nesta sessão em `probe_url_with_retry`
+    especificamente pra essa validação).
+  - **2º bug achado na mesma bancada, causa distinta**: reconexão depois de
+    conectado com sucesso (queda no meio do stream) não se recuperava sozinha
+    — precisava parar/reiniciar a sessão manualmente. Causa: `-timeout`
+    ausente nos args do ffmpeg (`ffmpeg_input_args`); o default do demuxer
+    RTSP é `0` = espera infinita de I/O do socket. Se a fonte cai sem fechar
+    a conexão TCP de forma limpa, o `ffmpeg` nunca sai sozinho, e
+    `run_ffmpeg_once` fica bloqueado pra sempre num `read_exact` que também
+    nunca retorna — o supervisor de reconexão (`RECONNECT_DELAY`) nunca
+    chega a ser acionado porque a função nunca retorna erro. **Corrigido**:
+    `SOCKET_IO_TIMEOUT_US = 10_000_000` (10s) via `-timeout`, aplicado tanto
+    no probe quanto na sessão ao vivo (mesma função `ffmpeg_input_args`).
+    Revalidado em bancada: queda simulada (parar/reiniciar o servidor do app)
+    agora se recupera sozinha.
+  - **3º achado, não relacionado a reconexão**: a mesma bancada expôs que
+    `analyzeduration=0`/`probesize=32` (mínimo absoluto do ffmpeg) só
+    funciona com fontes que anunciam `sprop-parameter-sets` (SPS/PPS) no
+    SDP; um app RTSP Android usado no teste não anunciava, e o ffmpeg nunca
+    identificava a faixa de vídeo (`Could not find codec parameters`),
+    mesmo esperando 10+ minutos. Relaxado para `100000`/`65536`
+    (100ms/64KB) — ainda dentro do orçamento de latência, mas tolera fontes
+    que exigem farejar SPS/PPS no próprio stream. Câmeras IP genéricas
+    (Hikvision/Dahua-clone, ONVIF) tendem a anunciar os parâmetros
+    corretamente via SDP e não deveriam esbarrar nisso — o app específico
+    usado no teste é que tinha uma implementação RTSP incomum.
 
 - **T065e — Apelido de câmera Android** (pedido do usuário, 2026-08-11,
   depois de validar T065c em bancada: o nome amigável mostra o modelo bruto
