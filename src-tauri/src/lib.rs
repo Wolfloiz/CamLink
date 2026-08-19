@@ -102,8 +102,7 @@ fn new_vcam_backend() -> Box<dyn VirtualCameraBackend + Send> {
 /// WinGet coloca o diretório real do pacote no PATH, não um shim). Mesma
 /// convenção que o cliente real usa para o path default do servidor
 /// (`SC_SERVER_PATH_DEFAULT`, relativo ao próprio binário), só que via
-/// busca no PATH em vez de relativo ao instalador do CamLink (ainda não
-/// existe — bundling fica para o instalador real).
+/// busca no PATH em vez de relativo ao instalador do CamLink.
 fn find_server_jar_next_to_scrcpy_binary() -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     let binary_name = if cfg!(windows) {
@@ -120,23 +119,56 @@ fn find_server_jar_next_to_scrcpy_binary() -> Option<PathBuf> {
     })
 }
 
-/// Caminhos dos executáveis externos. v1: resolvidos via PATH (assume
-/// adb/scrcpy/ffmpeg instalados — quickstart.md pré-requisitos). O jar do
-/// scrcpy-server vem, em ordem: `SCRCPY_SERVER_PATH` se definida (é assim
-/// que o jar do fork `scrcpy-server-camlink` entra — T037) → procurado ao
-/// lado do binário `scrcpy` no PATH → `scrcpy-server` no diretório de
-/// trabalho como último recurso. Empacotamento real (instalador resolvendo
-/// paths bundled) fica para uma iteração futura.
+/// Diretório onde o instalador Windows (T067) coloca os binários
+/// vendorizados (`bundle.resources` de `tauri.windows.conf.json`) — mesmo
+/// diretório do `.exe` instalado, subpasta `bin/`. `None` em dev (não existe
+/// fora de uma instalação real via NSIS/MSI), o que faz `bundled_path` cair
+/// no fallback de PATH abaixo sem mudar o comportamento de
+/// `cargo tauri dev`.
+fn bundled_bin_dir() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.join("bin");
+    dir.is_dir().then_some(dir)
+}
+
+/// `filename` procurado tal qual dentro de `bundled_bin_dir()` (sem mexer
+/// em extensão — pro jar do scrcpy-server, que não tem `.exe`).
+fn bundled_file(filename: &str) -> Option<PathBuf> {
+    let candidate = bundled_bin_dir()?.join(filename);
+    candidate.is_file().then_some(candidate)
+}
+
+/// `name` com a extensão de executável da plataforma (`adb` → `adb.exe` no
+/// Windows), procurado dentro de `bundled_bin_dir()`. `None` se não
+/// instalado via instalador (dev) ou se o arquivo não existe ali.
+fn bundled_path(name: &str) -> Option<PathBuf> {
+    let filename = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    bundled_file(&filename)
+}
+
+/// Caminhos dos executáveis externos. Ordem de resolução pra
+/// `adb`/`ffmpeg`: bundled pelo instalador (`bundled_path`, T067) → PATH
+/// (fallback usado em dev, `cargo tauri dev` sem instalador — quickstart.md
+/// pré-requisitos cobre esse caso). `scrcpy` fica só em PATH: o cliente não
+/// é usado em runtime no Windows (R12 — só Linux invoca `--v4l2-sink`), não
+/// é embutido pelo instalador. O jar do scrcpy-server vem, em ordem:
+/// `SCRCPY_SERVER_PATH` se definida (T037) → bundled pelo instalador →
+/// procurado ao lado do binário `scrcpy` no PATH → `scrcpy-server` no
+/// diretório de trabalho como último recurso.
 fn resolve_external_paths() -> ExternalPaths {
     let server_jar = std::env::var("SCRCPY_SERVER_PATH")
         .ok()
         .map(PathBuf::from)
+        .or_else(|| bundled_file("scrcpy-server-camlink"))
         .or_else(find_server_jar_next_to_scrcpy_binary)
         .unwrap_or_else(|| PathBuf::from("scrcpy-server"));
     ExternalPaths {
-        adb: PathBuf::from("adb"),
+        adb: bundled_path("adb").unwrap_or_else(|| PathBuf::from("adb")),
         scrcpy: PathBuf::from("scrcpy"),
-        ffmpeg: PathBuf::from("ffmpeg"),
+        ffmpeg: bundled_path("ffmpeg").unwrap_or_else(|| PathBuf::from("ffmpeg")),
         server_jar,
         extra_env: Vec::new(),
     }

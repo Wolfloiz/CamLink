@@ -1,0 +1,20 @@
+{
+  "bundle": {
+    "resources": {
+      "../installer/windows/vendor/bin/adb.exe": "bin/adb.exe",
+      "../installer/windows/vendor/bin/AdbWinApi.dll": "bin/AdbWinApi.dll",
+      "../installer/windows/vendor/bin/AdbWinUsbApi.dll": "bin/AdbWinUsbApi.dll",
+      "../installer/windows/vendor/bin/ffmpeg.exe": "bin/ffmpeg.exe",
+      "../installer/windows/vendor/bin/scrcpy-server-camlink": "bin/scrcpy-server-camlink",
+      "target/release/camlink_lib.dll": "camlink_lib.dll"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "../installer/windows/nsis-hooks.nsh"
+      },
+      "wix": {
+        "fragmentPaths": ["../installer/windows/wix-fragment.wxs"]
+      }
+    }
+  }
+}

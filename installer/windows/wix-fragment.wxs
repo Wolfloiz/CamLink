@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  T067 — registro/desregistro do filtro DirectShow próprio do CamLink
+  (camlink_lib.dll, colocado na raiz do INSTALLDIR pelo bundle.resources —
+  mesma pasta do .exe principal). Registro é em HKEY_CURRENT_USER (sem
+  elevação — ver DllRegisterServer em src-tauri/src/virtualcam/dshow.rs),
+  então as ações precisam de Impersonate="yes" pra rodar como o usuário que
+  está instalando, não como LocalSystem (senão escreveria no HKCU errado).
+
+  Padrão calcado no CustomAction "DownloadAndInvokeBootstrapper" do próprio
+  main.wxs do tauri-bundler (Directory=INSTALLDIR, Execute=deferred,
+  ExeCommand com o property [INSTALLDIR] formatado). Deferred + sequenciado
+  depois de InstallFiles/antes de RemoveFiles porque immediate actions
+  rodam na fase de scripting, ANTES do arquivo existir de fato no disco.
+
+  Return="ignore" nos dois: falha em registrar/desregistrar o filtro não
+  deve travar o instalador inteiro (mesma postura tolerante já usada no
+  código Rust — ver set_filter_friendly_name em dshow.rs).
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <CustomAction Id="RegisterDShowFilter"
+                  Directory="INSTALLDIR"
+                  Impersonate="yes"
+                  Execute="deferred"
+                  Return="ignore"
+                  ExeCommand='regsvr32.exe /s "[INSTALLDIR]camlink_lib.dll"' />
+
+    <CustomAction Id="UnregisterDShowFilter"
+                  Directory="INSTALLDIR"
+                  Impersonate="yes"
+                  Execute="deferred"
+                  Return="ignore"
+                  ExeCommand='regsvr32.exe /u /s "[INSTALLDIR]camlink_lib.dll"' />
+
+    <InstallExecuteSequence>
+      <Custom Action="RegisterDShowFilter" After="InstallFiles">
+        <![CDATA[NOT REMOVE]]>
+      </Custom>
+      <Custom Action="UnregisterDShowFilter" Before="RemoveFiles">
+        <![CDATA[REMOVE="ALL"]]>
+      </Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>
