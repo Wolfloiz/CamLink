@@ -228,13 +228,18 @@ Nenhum NEEDS CLARIFICATION permanece.
 ## R5. Pipeline RTSP: ffmpeg low-delay
 
 - **Decision**: subprocess ffmpeg por fonte:
-  `-fflags nobuffer -flags low_delay -analyzeduration 0 -probesize 32
+  `-fflags nobuffer -flags low_delay -analyzeduration 100000 -probesize 65536
   -rtsp_transport tcp -i <url>` → Linux: `-f v4l2 /dev/videoX`; Windows:
   rawvideo em pipe → push akvirtualcamera. Validação de URL com timeout de 3 s
   antes de iniciar.
 - **Rationale**: atende o alvo ≤ 300 ms com flags de buffer mínimo; TCP evita
   perda em redes domésticas; ffmpeg é dependência já exigida pelo caminho
-  Windows.
+  Windows. `analyzeduration`/`probesize` relaxados de 0/32 (mínimo absoluto)
+  para 100ms/64KB em 2026-08-19: câmeras que não anunciam
+  `sprop-parameter-sets` no SDP (achado em bancada, app RTSP Android) exigem
+  farejar SPS/PPS no próprio stream — com 32 bytes o ffmpeg nunca identifica
+  a faixa de vídeo (`Could not find codec parameters`); o mínimo absoluto só
+  funciona com fontes que exportam os parâmetros via SDP.
 - **Alternatives considered**: GStreamer (segunda dependência pesada sem ganho
   claro); crate `retina` (RTSP puro-Rust, ainda exigiria decode + conversão —
   reavaliar se o ffmpeg se mostrar frágil).

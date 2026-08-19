@@ -28,7 +28,13 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 // Montagem de argumentos e classificação (puro, testado em rtsp_test.rs)
 // ---------------------------------------------------------------------------
 
-/// Flags de input low-delay — exatamente as de research.md R5.
+/// Flags de input low-delay (research.md R5). `analyzeduration`/`probesize`
+/// foram relaxados de 0/32 (mínimo absoluto do ffmpeg) para 100ms/64KB
+/// (2026-08-19): câmeras que não anunciam `sprop-parameter-sets` no SDP
+/// (achado em bancada com um app RTSP Android) exigem farejar SPS/PPS no
+/// próprio stream, e 32 bytes nunca é suficiente — o ffmpeg nem identifica
+/// a faixa de vídeo (`Could not find codec parameters`). O valor mínimo
+/// absoluto só funciona com fontes que exportam os parâmetros via SDP.
 pub fn ffmpeg_input_args(url: &str) -> Vec<String> {
     vec![
         "-fflags".into(),
@@ -36,9 +42,9 @@ pub fn ffmpeg_input_args(url: &str) -> Vec<String> {
         "-flags".into(),
         "low_delay".into(),
         "-analyzeduration".into(),
-        "0".into(),
+        "100000".into(),
         "-probesize".into(),
-        "32".into(),
+        "65536".into(),
         "-rtsp_transport".into(),
         "tcp".into(),
         "-i".into(),
@@ -280,9 +286,22 @@ pub async fn probe_url_with_retry(
         if attempt > 0 {
             tokio::time::sleep(retry_delay).await;
         }
+        let started = std::time::Instant::now();
         match probe_url(ffmpeg, url, extra_env).await {
-            Ok(()) => return Ok(()),
-            Err(e) => last_err = Some(e),
+            Ok(()) => {
+                tracing::debug!(attempt = attempt + 1, elapsed = ?started.elapsed(), "probe RTSP ok");
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_attempts,
+                    elapsed = ?started.elapsed(),
+                    code = %e.code,
+                    "probe RTSP falhou"
+                );
+                last_err = Some(e);
+            }
         }
     }
     Err(last_err.expect("max_attempts.max(1) garante ao menos 1 iteração"))
