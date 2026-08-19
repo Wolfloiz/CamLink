@@ -1281,6 +1281,39 @@ unsafe fn reg_set_sz(
     err
 }
 
+/// Sobrescreve o `FriendlyName` já registrado (por `DllRegisterServer`) com
+/// o label real da câmera em uso. Escreve nas duas chaves que o consumidor
+/// (OBS/Chrome/Meet) pode ler: a raiz do CLSID e a entrada na categoria de
+/// captura de vídeo — a segunda é a que a maioria dos seletores usa.
+///
+/// # Safety
+/// Só chama APIs de registro do Win32 com strings próprias (`wide`); não
+/// recebe ponteiros do chamador.
+unsafe fn set_filter_friendly_name(label: &str) -> Result<(), WIN32_ERROR> {
+    let clsid_str = guid_to_reg_string(&CLSID_CAMLINK_FILTER);
+    let category_str = guid_to_reg_string(&CLSID_VIDEO_INPUT_DEVICE_CATEGORY);
+
+    let err = reg_set_sz(
+        HKEY_CURRENT_USER,
+        &format!("Software\\Classes\\CLSID\\{clsid_str}"),
+        None,
+        label,
+    );
+    if err != WIN32_ERROR(0) {
+        return Err(err);
+    }
+    let err = reg_set_sz(
+        HKEY_CURRENT_USER,
+        &format!("Software\\Classes\\CLSID\\{category_str}\\Instance\\{clsid_str}"),
+        Some("FriendlyName"),
+        label,
+    );
+    if err != WIN32_ERROR(0) {
+        return Err(err);
+    }
+    Ok(())
+}
+
 fn dll_path() -> WinResult<String> {
     unsafe {
         // Handle DESTE módulo (a DLL), não do processo host — via
@@ -1454,6 +1487,16 @@ impl VirtualCameraBackend for DShowBackend {
             backend_path: guid_to_reg_string(&CLSID_CAMLINK_FILTER),
             state: VirtualCameraState::Standby,
         };
+
+        // O nome fixo `FILTER_FRIENDLY_NAME` gravado em `DllRegisterServer`
+        // é só o valor de instalação; sobrescrevemos aqui com o label real
+        // para que o seletor de câmera do consumidor (OBS/Chrome/Meet) mostre
+        // o nome escolhido pelo usuário na próxima vez que reenumerar os
+        // devices. Falha aqui não deve impedir a câmera de funcionar — só
+        // loga, já que o nome fixo continua sendo um fallback válido.
+        if let Err(e) = unsafe { set_filter_friendly_name(label) } {
+            tracing::warn!(%label, error = ?e, "falha ao atualizar FriendlyName no registro");
+        }
 
         let standby = standby_frame(resolution, "Aguardando fonte...");
         let mut rgb24 = standby;
