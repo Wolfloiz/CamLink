@@ -1,0 +1,40 @@
+name: Bug
+description: Algo não está funcionando como esperado
+labels: ["bug"]
+body:
+  - type: textarea
+    id: descricao
+    attributes:
+      label: O que aconteceu
+      description: Descreva o comportamento observado e o esperado
+    validations:
+      required: true
+  - type: dropdown
+    id: plataforma
+    attributes:
+      label: Plataforma
+      options:
+        - Linux
+        - Windows
+        - Ambas
+    validations:
+      required: true
+  - type: input
+    id: versao
+    attributes:
+      label: Versão do CamLink (ou commit)
+    validations:
+      required: false
+  - type: textarea
+    id: passos
+    attributes:
+      label: Passos para reproduzir
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs relevantes (terminal do app, `RUST_LOG=debug`)
+      render: text
+    validations:
+      required: false
