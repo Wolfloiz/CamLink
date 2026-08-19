@@ -47,10 +47,21 @@ pub fn ffmpeg_input_args(url: &str) -> Vec<String> {
         "65536".into(),
         "-rtsp_transport".into(),
         "tcp".into(),
+        "-timeout".into(),
+        SOCKET_IO_TIMEOUT_US.to_string(),
         "-i".into(),
         url.into(),
     ]
 }
+
+/// Timeout de I/O do socket RTSP (microssegundos) — sem isso o default do
+/// ffmpeg é 0 (espera infinita): se a fonte cair sem fechar a conexão TCP
+/// de forma limpa, o processo nunca sai sozinho e o supervisor de
+/// reconexão (`run_ffmpeg_once`) fica bloqueado pra sempre num
+/// `read_exact` que também nunca retorna (achado em bancada 2026-08-19,
+/// T054 — queda no meio do stream não se recuperava sem parar/reiniciar
+/// a sessão manualmente).
+const SOCKET_IO_TIMEOUT_US: u64 = 10_000_000;
 
 /// Saída Linux: direto no device v4l2loopback (YUYV — mesmo formato que o
 /// backend `virtualcam::v4l2` negocia para consumidores reais).

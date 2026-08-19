@@ -31,6 +31,8 @@ fn input_args_match_research_r5_low_delay_flags() {
             "65536".to_string(),
             "-rtsp_transport".to_string(),
             "tcp".to_string(),
+            "-timeout".to_string(),
+            "10000000".to_string(),
             "-i".to_string(),
             "rtsp://192.168.0.42:554/stream1".to_string(),
         ]
