@@ -235,6 +235,7 @@ do fork, Java), `installer/{linux,windows}/`.
 - [ ] T070 Soak test 2 h com monitoramento de RSS/fps (SC-005) — roteiro no quickstart Cenário 7; corrigir vazamentos encontrados
 - [ ] T071 Instalação limpa validada: Ubuntu 22.04/24.04, Arch, Windows 10 e 11 — primeiro vídeo sem terminal (SC-008, SC-010)
 - [ ] T072 [P] Documentação de usuário final (`README.md` completo: instalação, autorização USB, troubleshooting/diagnósticos da tabela do quickstart)
+- [ ] T083 [P] Revisão de UI/UX do frontend (SvelteKit): conceito visual/design já está bom, mas execução não — não está responsivo (layout quebra em janelas menores/redimensionadas) e algumas partes não estão legíveis (contraste/tamanho de texto). **Adicionado a pedido do usuário (2026-08-19), só backlog por enquanto — sem investigação de causa ainda, mexer nisso fica pra depois.**
 - [ ] T073 Passe final de gates + quickstart completo nas duas plataformas; auditoria: sem `unwrap()` em caminho falível, `// SAFETY:` em todo unsafe FFI (Constituição VI); auditoria de privacidade (FR-026): confirmar que nenhuma dependência/código faz chamada de rede além das fontes RTSP configuradas, e documentar no README
 
 ---
@@ -674,6 +675,32 @@ Após Phase 2: Dev A → trilha Android (US1→US2→US3→US5); Dev B → trilh
     (Hikvision/Dahua-clone, ONVIF) tendem a anunciar os parâmetros
     corretamente via SDP e não deveriam esbarrar nisso — o app específico
     usado no teste é que tinha uma implementação RTSP incomum.
+  - **Apps Android usados como fonte RTSP de teste nesta bancada** (útil pra
+    reproduzir/testar de novo):
+    - **App genérico "RTSP Camera"** (nome genérico, várias apps com esse
+      título na Play Store) — **não funciona como fonte de teste**. URL
+      servida: `rtsp://<ip-do-celular>:1945/` (sem path). Sintoma: no app,
+      o log mostra "connection success" seguido de "failed" pouco depois; no
+      CamLink, o probe sempre estourava os 3s de timeout
+      (`rtsp_timeout`/"Fonte RTSP não respondeu em 3 s"). Causa confirmada
+      rodando o mesmo comando do probe manualmente: o ffmpeg conecta (TCP
+      ok), mas nunca resolve os parâmetros do stream de vídeo H.264 —
+      `Could not find codec parameters for stream 0 (Video: h264, none):
+      unspecified size`, chegando a mapear só a faixa de ÁUDIO pra saída
+      (`Stream #0:1 -> #0:0 (aac...)`). Testado esperando 10 min 25 s sem
+      nunca resolver (`analyzeduration=0`/`probesize=32`) e de novo com os
+      valores relaxados (`100000`/`65536`) — mesmo erro nos dois casos.
+      `ffplay` (sem forçar `-rtsp_transport`, e também com `tcp` forçado)
+      consegue abrir vídeo+áudio normalmente — então o stream em si é
+      válido, é o demuxer RTSP do `ffmpeg` (o que o CamLink usa) que não
+      consegue com o SDP/empacotamento específico desse app.
+    - **IP Webcam** (autor Pavel Khlebovich, app maduro e popular, existe há
+      anos) — **funciona bem, usado pra validar os bugs #1 e #2 acima**.
+      Precisa habilitar H.264 em "Video preferences" antes de "Start
+      server"; URL RTSP típica: `rtsp://<ip-do-celular>:8080/h264_ulaw.sdp`
+      (pode variar por versão — o app mostra o endereço na tela). Testado
+      direto com `ffmpeg`/`ffplay` e end-to-end pelo CamLink (conexão,
+      cold start, queda no meio do stream) sem esse problema de SDP.
 
 - **T065e — Apelido de câmera Android** (pedido do usuário, 2026-08-11,
   depois de validar T065c em bancada: o nome amigável mostra o modelo bruto
