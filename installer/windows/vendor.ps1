@@ -24,11 +24,21 @@
     (run scrcpy/build-camlink.sh first, via WSL/Git Bash with JDK 17 +
     Android SDK - this script does not build the fork, only vendors
     binaries).
+
+    `-Stub` skips every download and just creates empty placeholder files
+    at the same paths, instantly. `tauri-build`'s build.rs checks that
+    every `bundle.resources` path in tauri.windows.conf.json EXISTS on
+    every `cargo build`/`check`/`clippy`/`test` on Windows (not only when
+    actually bundling an installer) - without this, a fresh clone (or CI)
+    can't even compile until someone runs the full vendoring. Use `-Stub`
+    for plain dev/test work; drop it (or re-run without it) before an
+    actual `tauri build` you intend to ship.
 #>
 
 [CmdletBinding()]
 param(
-    [string]$FfmpegAsset = "ffmpeg-n8.1-latest-win64-gpl-8.1.zip"
+    [string]$FfmpegAsset = "ffmpeg-n8.1-latest-win64-gpl-8.1.zip",
+    [switch]$Stub
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,6 +48,29 @@ $VendorBin = Join-Path $PSScriptRoot "vendor\bin"
 $TmpDir = Join-Path $PSScriptRoot "vendor\.tmp"
 
 New-Item -ItemType Directory -Force -Path $VendorBin | Out-Null
+
+# camlink_lib.dll (the DirectShow filter itself) is also a bundle.resources
+# entry, but it's a build OUTPUT (cargo produces it), not something we
+# vendor. build.rs checks it exists even before the very first `cargo
+# build --release` has produced it (chicken-and-egg on a fresh checkout) -
+# a placeholder here is harmless either way: cargo overwrites it with the
+# real DLL once the release build actually runs.
+$ReleaseDll = Join-Path $RepoRoot "src-tauri\target\release\camlink_lib.dll"
+if (-not (Test-Path $ReleaseDll)) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $ReleaseDll) | Out-Null
+    New-Item -ItemType File -Force -Path $ReleaseDll | Out-Null
+}
+
+if ($Stub) {
+    foreach ($file in @("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "ffmpeg.exe", "scrcpy-server-camlink")) {
+        New-Item -ItemType File -Force -Path (Join-Path $VendorBin $file) | Out-Null
+        Write-Host "  -> $file (stub)"
+    }
+    Write-Host ""
+    Write-Host "Stub vendoring done at $VendorBin (empty placeholders, not real binaries)"
+    exit 0
+}
+
 New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
 
 function Get-AndExtractZip {
