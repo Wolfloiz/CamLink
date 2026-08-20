@@ -36,6 +36,15 @@ jobs:
       - name: Criar frontendDist vazio
         run: mkdir -p build
 
+      # bundle.resources de tauri.windows.conf.json (T067) exige que os
+      # paths existam em TODO cargo build/check/clippy/test no Windows, não
+      # só ao empacotar o instalador de verdade — stub evita baixar
+      # adb/ffmpeg (~150 MB) só pra compilar/testar.
+      - name: Vendorizar binários (stub, Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./installer/windows/vendor.ps1 -Stub
+
       - name: cargo fmt --check
         working-directory: src-tauri
         run: cargo fmt --check
