@@ -17,7 +17,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Instalar dependências de sistema do Tauri (Linux)
         if: runner.os == 'Linux'
@@ -44,6 +44,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./installer/windows/vendor.ps1 -Stub
+
+      # Mesmo motivo no Linux: bundle.resources de tauri.linux.conf.json
+      # (T066) aponta pro jar do fork em installer/linux/vendor/, que é
+      # gitignored — sem o stub, build.rs falha antes de qualquer lint/teste.
+      - name: Vendorizar binários (stub, Linux)
+        if: runner.os == 'Linux'
+        run: ./installer/linux/vendor.sh --stub
 
       - name: cargo fmt --check
         working-directory: src-tauri

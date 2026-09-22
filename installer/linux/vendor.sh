@@ -10,6 +10,12 @@
 #   ./vendor.sh --scrcpy --prefix /opt/camlink
 #                                  instala o scrcpy oficial num prefixo
 #                                  (usado pelo install.sh --with-scrcpy)
+#   ./vendor.sh --stub             placeholders vazios, sem baixar nada —
+#                                  o build.rs do tauri-build exige que todo
+#                                  path de bundle.resources exista em
+#                                  QUALQUER cargo check/clippy/test, e
+#                                  vendor/ é gitignored (espelha o -Stub do
+#                                  vendor.ps1). Não serve pra empacotar.
 #
 # Por que adb/ffmpeg ficam fora do .deb: no Debian/Ubuntu/Arch eles vêm da
 # distro (`Depends:`), que é a convenção da plataforma e evita duplicar
@@ -38,12 +44,31 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --jar-only) MODE=jar ;;
     --scrcpy)   MODE=scrcpy ;;
+    --stub)     MODE=stub ;;
     --prefix)   PREFIX="$2"; shift ;;
-    -h|--help)  sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)  sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "opção desconhecida: $1" >&2; exit 1 ;;
   esac
   shift
 done
+
+# `--stub` cria os arquivos vazios nos mesmos caminhos e sai. O build.rs do
+# tauri-build valida que todo path de `bundle.resources`
+# (src-tauri/tauri.linux.conf.json) EXISTE em qualquer
+# `cargo build/check/clippy/test`, não só ao empacotar o instalador de
+# verdade — e `installer/linux/vendor/` é gitignored, então um checkout
+# limpo (CI incluso) não compila sem isto. Espelha o `-Stub` do vendor.ps1
+# (T067). Placeholder vazio NÃO serve pra `tauri build`: rode sem `--stub`
+# antes de gerar pacote pra valer.
+if [[ "$MODE" == "stub" ]]; then
+  mkdir -p "$VENDOR_BIN"
+  for f in scrcpy-server-camlink adb ffmpeg; do
+    : >"$VENDOR_BIN/$f"
+    echo "  -> $f (stub)"
+  done
+  echo -e "\nStub criado em $VENDOR_BIN (placeholders vazios, não são binários reais)"
+  exit 0
+fi
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "faltando: $1" >&2; exit 1; }; }
 need curl
