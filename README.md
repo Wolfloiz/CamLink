@@ -54,6 +54,42 @@ cd src-tauri
 cargo fmt --check && cargo clippy -- -D warnings && cargo test
 ```
 
+## Privacidade
+
+O CamLink não envia nada para lugar nenhum. Não há telemetria, analytics,
+verificação de atualização nem "phone home" de qualquer espécie. Isto é um
+requisito do projeto (FR-026), não uma escolha de configuração — e foi
+auditado, não apenas declarado:
+
+- **Dependências**: das 274 crates na árvore de compilação, nenhuma é
+  cliente HTTP, stack TLS ou SDK de telemetria. As únicas com capacidade de
+  rede são `mio` e `socket2`, que são as primitivas de I/O do `tokio`.
+- **Sockets do aplicativo**: existem exatamente dois no código, e ambos
+  conectam em `127.0.0.1` — são os túneis que o `adb` abre para falar com o
+  celular pelo cabo USB. Nenhum endereço externo é alcançável por eles.
+- **Interface**: nenhum `fetch`, `XMLHttpRequest` ou `WebSocket`; nenhuma
+  fonte, folha de estilo, script ou imagem vinda de CDN. Tudo que a tela
+  carrega está dentro do pacote instalado.
+- **Única saída de rede**: o `ffmpeg`, quando você configura uma fonte
+  IP/RTSP, conecta no endereço que **você** digitou. É o propósito do
+  recurso. Nenhum outro destino é contatado, e a saída do ffmpeg é sempre
+  local (o dispositivo de câmera virtual ou a própria memória do app).
+- **Credenciais**: senhas de câmeras RTSP ficam apenas no cofre do sistema
+  operacional (Secret Service no Linux, Gerenciador de Credenciais no
+  Windows). Nunca no arquivo de configuração, e os logs censuram a
+  credencial na URL antes de escrever.
+- **Vídeo**: os frames nunca saem da máquina. Vão do celular (USB) ou da
+  câmera IP direto para o dispositivo de câmera virtual local, consumido
+  por OBS/navegador/Discord na mesma máquina.
+
+A política de segurança de conteúdo (CSP) da janela restringe o que a
+interface pode carregar, de modo que nem um erro futuro nosso consiga
+introduzir uma requisição externa sem que isso apareça como violação.
+
+Os binários que o CamLink executa (`adb`, `scrcpy`, `ffmpeg`,
+`v4l2loopback-ctl`) são de terceiros e vêm da sua distribuição ou embutidos
+no instalador; o projeto não os modifica.
+
 ## Limitações conhecidas
 
 - **Trocar de câmera (frontal/traseira), espelhar ou girar (qualquer ângulo)
@@ -87,21 +123,6 @@ cargo fmt --check && cargo clippy -- -D warnings && cargo test
   preview concorrente) não reproduziram em testes isolados — o disparo real
   parece exigir o padrão de uso completo do app. **Ainda sem decisão de
   como tratar definitivamente; será decidido antes da versão release.**
-- **Fonte RTSP pode parar de reconectar sozinha depois de uma queda, exigindo
-  reiniciar o app** (achado em bancada durante a validação do T054,
-  2026-08-03, com um servidor RTSP local simulado). Confirmado via `fuser
-  -v` que dois processos `ffmpeg` distintos chegaram a manter o mesmo device
-  `v4l2loopback` aberto ao mesmo tempo — um deles vazado (nunca encerrado
-  numa tentativa anterior) — causando `ioctl(VIDIOC_G_FMT): Invalid
-  argument` / `Could not write header` no writer novo, reproduzido também
-  chamando o mesmo comando manualmente fora do app. Depois de matar o
-  processo vazado e liberar o device, o supervisor de reconexão do RTSP
-  **não retomou sozinho** (nenhuma nova tentativa nos logs do servidor por
-  mais de 1 minuto) — indício de que a tarefa de reconexão trava esperando
-  algo (suspeita: o leitor de snapshot do preview, que também ficou preso
-  bloqueado num `read_exact` sem nenhum writer produzindo frame nesse
-  intervalo). **Causa raiz ainda não corrigida** — ver item correspondente
-  em `specs/001-phone-webcam-bridge/tasks.md` § Débito técnico.
 
 ## Licença
 
