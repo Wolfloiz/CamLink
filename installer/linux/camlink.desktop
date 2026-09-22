@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=CamLink
+GenericName=Webcam virtual
+Comment=Use câmeras Android (USB) e fontes IP/RTSP como webcam virtual
+Exec=camlink
+Icon=camlink
+Terminal=false
+Categories=AudioVideo;Video;Utility;
+Keywords=webcam;camera;android;rtsp;obs;v4l2;

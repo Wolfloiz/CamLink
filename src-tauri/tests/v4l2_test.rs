@@ -21,8 +21,9 @@
 #![cfg(target_os = "linux")]
 
 use camlink_lib::virtualcam::v4l2::{
-    build_add_args, ctl_supports_dynamic_add, detect_secure_boot_block, find_reusable_device,
-    orphan_devices, parse_added_device, parse_ctl_version, parse_list_output, LoopbackDevice,
+    build_add_args, ctl_supports_dynamic_add, detect_control_device_block,
+    detect_secure_boot_block, find_reusable_device, orphan_devices, parse_added_device,
+    parse_ctl_version, parse_list_output, LoopbackDevice,
 };
 use camlink_lib::virtualcam::{vcam_label, LABEL_PREFIX};
 
@@ -316,4 +317,57 @@ fn unrelated_modprobe_error_is_not_secure_boot() {
 #[test]
 fn empty_stderr_is_not_secure_boot() {
     assert!(detect_secure_boot_block("").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// detect_control_device_block — falhas de acesso a /dev/v4l2loopback (T066)
+//
+// São exatamente os dois modos de falha do instalador Linux: udev rule
+// ausente/usuário fora do grupo `video` (EACCES) e módulo não carregado
+// (ENOENT, `modules-load.d` ausente ou boot sem o módulo). Formato da
+// mensagem verificado no binário real (`v4l2loopback-ctl` v0.15.4):
+// `perror("unable to open control device '/dev/v4l2loopback'")`, que
+// imprime `<prefixo>: <strerror>`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn detects_permission_denied_on_control_device() {
+    let stderr = "unable to open control device '/dev/v4l2loopback': Permission denied\n";
+    let err = detect_control_device_block(stderr).expect("deve detectar EACCES");
+    assert_eq!(err.code, "v4l2_permission_denied");
+    let hint = err.action_hint.expect("EACCES deve ter action_hint");
+    assert!(
+        hint.contains("video"),
+        "a dica precisa citar o grupo video: {hint}"
+    );
+}
+
+#[test]
+fn detects_module_not_loaded_on_control_device() {
+    let stderr = "unable to open control device '/dev/v4l2loopback': No such file or directory\n";
+    let err = detect_control_device_block(stderr).expect("deve detectar ENOENT");
+    assert_eq!(err.code, "v4l2_module_not_loaded");
+    assert!(err.action_hint.is_some());
+}
+
+#[test]
+fn permission_message_is_matched_case_insensitively() {
+    let stderr = "UNABLE TO OPEN CONTROL DEVICE '/dev/v4l2loopback': PERMISSION DENIED";
+    assert_eq!(
+        detect_control_device_block(stderr).map(|e| e.code),
+        Some("v4l2_permission_denied".to_string())
+    );
+}
+
+#[test]
+fn secure_boot_stderr_is_not_a_control_device_block() {
+    // Secure Boot tem diagnóstico próprio (detect_secure_boot_block) — não
+    // pode ser confundido com falta de permissão.
+    let stderr = "modprobe: ERROR: could not insert 'v4l2loopback': Key was rejected by service\n";
+    assert!(detect_control_device_block(stderr).is_none());
+}
+
+#[test]
+fn empty_stderr_is_not_a_control_device_block() {
+    assert!(detect_control_device_block("").is_none());
 }
