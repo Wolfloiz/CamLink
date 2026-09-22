@@ -14,14 +14,17 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Câmeras Android (USB) e fontes IP/RTSP como webcams virtuais"
 arch=('x86_64')
-url="https://github.com/luizhfmonteiro/camlink"
+url="https://github.com/Wolfloiz/CamLink"
 license=('GPL-3.0-or-later')
 # scrcpy só é necessário para fontes Android (RTSP funciona sem), mas o Arch
 # empacota uma versão atual — diferente do Debian/Ubuntu, onde a versão da
 # distro é antiga demais e o install.sh cuida disso.
 depends=('webkit2gtk-4.1' 'gtk3' 'ffmpeg' 'android-tools' 'scrcpy>=4.0'
          'v4l2loopback-dkms>=0.13' 'v4l-utils')
-makedepends=('rust' 'cargo' 'nodejs' 'pnpm' 'git')
+# `cargo` é virtual (provido por `rust` OU `rustup`) — listar `rust`
+# explícito impediria quem usa rustup de buildar, porque rustup declara
+# Conflicts com rust/cargo.
+makedepends=('cargo' 'nodejs' 'pnpm' 'git')
 install="${pkgname}.install"
 source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz"
         "scrcpy-server-camlink-${pkgver}::${url}/releases/download/v${pkgver}/scrcpy-server-camlink")
@@ -32,6 +35,17 @@ build() {
   cd "${srcdir}/CamLink-${pkgver}"
   pnpm install --frozen-lockfile
   pnpm build
+
+  # O build.rs do tauri-build valida que todo path de `bundle.resources`
+  # (tauri.linux.conf.json) EXISTE em QUALQUER `cargo build`, não só ao
+  # empacotar — e `installer/linux/vendor/` é gitignored, logo não vem no
+  # tarball do GitHub. O jar já está no srcdir como fonte própria do
+  # pacote; basta pô-lo onde a config espera. Usar o jar real (e não um
+  # stub) mantém o caminho correto se o build() um dia passar a usar
+  # `tauri build`.
+  install -Dm644 "${srcdir}/scrcpy-server-camlink-${pkgver}" \
+    "installer/linux/vendor/bin/scrcpy-server-camlink"
+
   cd src-tauri
   cargo build --release --locked --bin camlink
 }
