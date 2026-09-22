@@ -25,7 +25,7 @@
     "active": true,
     "targets": ["deb", "appimage", "nsis", "msi"],
     "publisher": "CamLink",
-    "homepage": "https://github.com/luizhfmonteiro/camlink",
+    "homepage": "https://github.com/Wolfloiz/CamLink",
     "license": "GPL-3.0-or-later",
     "category": "Video",
     "shortDescription": "Câmeras Android e IP como webcams virtuais",
