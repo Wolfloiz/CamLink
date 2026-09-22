@@ -28,31 +28,211 @@ Firefox — WebRTC), Discord e qualquer aplicativo que use câmera.
 
 ## Status
 
-🚧 Em desenvolvimento — ainda não há release. Acompanhe o progresso em
-[`specs/001-phone-webcam-bridge/`](specs/001-phone-webcam-bridge/).
+🚧 **Ainda não há release publicada.** Todas as funcionalidades abaixo
+existem e foram validadas em bancada, mas os instaladores ainda não estão
+disponíveis para download — por enquanto é preciso
+[compilar do código-fonte](#compilando-do-código-fonte). Acompanhe o
+progresso em [`specs/001-phone-webcam-bridge/`](specs/001-phone-webcam-bridge/).
 
-## Stack
+## Instalação
 
-- **Backend**: Rust (Tauri 2.x) — `src-tauri/`
-- **UI**: SvelteKit — `src/`
-- **Android**: fork do [scrcpy](https://github.com/Genymobile/scrcpy)-server
-  (Java 17, submodule em `scrcpy/`, branch `camlink`)
-- **Runtime**: adb, scrcpy ≥ 4.0, ffmpeg, v4l2loopback ≥ 0.13 (Linux),
-  filtro DirectShow próprio (Windows — sem driver de terceiros)
+### Linux
 
-## Desenvolvimento
+O CamLink precisa do módulo `v4l2loopback`, que é o que cria o dispositivo de
+webcam virtual, e de uma regra `udev` para que ele funcione **sem pedir sua
+senha a cada fonte iniciada**. Os pacotes cuidam disso na instalação.
 
-```bash
-pnpm install
-pnpm tauri dev
-```
-
-Gates de qualidade (obrigatórios, ver `.specify/memory/constitution.md`):
+**Debian / Ubuntu / Zorin / Mint** — instale o `.deb` pelo gerenciador de
+pacotes gráfico ou por linha de comando:
 
 ```bash
-cd src-tauri
-cargo fmt --check && cargo clippy -- -D warnings && cargo test
+sudo apt install ./CamLink_0.1.0_amd64.deb
 ```
+
+As dependências (`adb`, `ffmpeg`, `v4l-utils`, `v4l2loopback-dkms`) vêm da
+distribuição. O `scrcpy` fica de fora de propósito: o que o Debian/Ubuntu
+empacota é antigo demais (o CamLink precisa de ≥ 4.0) — veja
+[scrcpy antigo demais](#scrcpy-antigo-demais).
+
+**Arch / Manjaro / EndeavourOS** — pelo AUR:
+
+```bash
+yay -S camlink
+```
+
+**AppImage** — traz o app e suas dependências, mas **não** configura o
+`v4l2loopback` do sistema, que é o que cria a webcam virtual. Essa parte
+precisa ser feita uma vez, com o script de pré-requisitos:
+
+```bash
+chmod +x CamLink_0.1.0_amd64.AppImage
+
+git clone --depth 1 https://github.com/Wolfloiz/CamLink.git
+sudo ./CamLink/installer/linux/install.sh
+```
+
+O clone é necessário porque o script instala arquivos de configuração que
+ficam ao lado dele. Se você prefere não clonar nada, use o `.deb` ou o
+pacote do AUR, que fazem isso sozinhos.
+
+Depois de qualquer instalação, **faça logout e login** — seu usuário foi
+adicionado ao grupo `video` e isso só vale na próxima sessão.
+
+### Windows 10 e 11
+
+Baixe o instalador (`CamLink_0.1.0_x64-setup.exe` ou o `.msi`) e execute. Ele
+já traz tudo embutido — `adb`, `ffmpeg` e a câmera virtual — e registra a
+câmera no sistema automaticamente. Não é preciso instalar driver de terceiros.
+
+## Usando com o celular Android
+
+Seu celular precisa de **Android 12 ou superior**. Nada é instalado nele.
+
+**1. Habilite a depuração USB no celular** (uma vez só):
+
+- Abra *Configurações → Sobre o telefone* e toque **7 vezes** em *Número da
+  versão*. Aparece a mensagem "Você agora é um desenvolvedor".
+- Volte para *Configurações → Sistema → Opções do desenvolvedor* e ligue
+  **Depuração USB**.
+
+**2. Conecte o cabo USB.** O celular aparece na lista do CamLink em até 3
+segundos.
+
+**3. Autorize no celular.** Na primeira conexão o Android mostra *"Permitir
+depuração USB?"*. Marque **Sempre permitir deste computador** e toque em
+**Permitir**. Enquanto isso não for feito, o CamLink lista o aparelho como
+**Não autorizado** — veja
+[a seção de solução de problemas](#o-celular-fica-não-autorizado).
+
+**4. Clique em Iniciar transmissão.** A câmera virtual passa a existir e
+aparece no OBS, no Chrome, no Firefox, no Discord e em qualquer programa que
+use webcam, com o nome que você definir para a fonte.
+
+> Use um cabo de **dados**. Muitos cabos que acompanham carregadores só
+> conduzem energia, e nesses o celular nunca aparece na lista.
+
+## Usando uma câmera IP (RTSP)
+
+Na aba **Fontes RTSP**, dê um nome à fonte e informe a URL da câmera — por
+exemplo `rtsp://192.168.0.42:554/stream`.
+
+Se a câmera exigir login, há duas formas de informar as credenciais, e em
+nenhuma delas a senha vai na URL:
+
+- **Usuário na URL, senha no campo Senha** — escreva
+  `rtsp://admin@192.168.0.42:554/stream` e preencha só a senha.
+- **Tudo no campo Senha** — deixe a URL sem usuário e preencha o campo com
+  `usuario:senha`.
+
+A senha vai para o cofre de segredos do sistema operacional (Secret Service
+no Linux, Gerenciador de Credenciais no Windows) e só é injetada na URL no
+momento de conectar. Ela nunca é gravada no arquivo de configuração nem
+aparece nos logs, que censuram a credencial antes de escrever.
+
+## Solução de problemas
+
+No Linux, o diagnóstico automático resolve a maior parte dos casos e **não
+precisa de senha**:
+
+```bash
+/usr/share/camlink/install.sh --check
+```
+
+Ele lista o que está faltando, item por item:
+
+```
+CamLink — diagnóstico de pré-requisitos
+  adb: /usr/bin/adb
+  ffmpeg: /usr/bin/ffmpeg
+  v4l2loopback-ctl: /usr/bin/v4l2loopback-ctl
+  scrcpy: 4.0
+  v4l2loopback-ctl: 0.15.4
+  udev rule: /usr/lib/udev/rules.d/99-camlink-v4l2loopback.rules
+  modules-load.d: /usr/lib/modules-load.d/camlink-v4l2loopback.conf
+  módulo: carregado
+  /dev/v4l2loopback: acessível por este usuário
+Tudo pronto.
+```
+
+Itens em vermelho vêm com a instrução do que fazer. Quando algo falta, a
+última linha diz quantos itens estão pendentes e manda rodar o instalador.
+
+### O celular fica "Não autorizado"
+
+O Android não recebeu (ou recusou) a autorização de depuração USB. Desconecte
+e reconecte o cabo: o diálogo *"Permitir depuração USB?"* deve reaparecer.
+
+Se ele não aparecer mais, é porque a chave deste computador foi memorizada com
+"recusar". No celular, vá em *Opções do desenvolvedor → Revogar autorizações de
+depuração USB*, reconecte e autorize.
+
+### Nenhum celular aparece na lista
+
+Nesta ordem: confirme que o cabo é de **dados** e não só de carga; que a
+**Depuração USB** está ligada; e, no Linux, que o `adb` está instalado
+(`install.sh --check` diz). Trocar a porta USB também resolve casos de hub com
+pouca energia.
+
+### "Sem permissão para criar a câmera virtual"
+
+Seu usuário não está no grupo `video`, ou está mas a sessão ainda não sabe
+disso. **Faça logout e login.** Para conferir sem deslogar:
+
+```bash
+id -nG | tr ' ' '\n' | grep -x video
+```
+
+Se não imprimir nada, rode `sudo /usr/share/camlink/install.sh`.
+
+### "O módulo v4l2loopback não está carregado"
+
+```bash
+sudo modprobe v4l2loopback
+```
+
+Se funcionar mas voltar a falhar depois de reiniciar, o arquivo que carrega o
+módulo no boot não foi instalado — rode `sudo /usr/share/camlink/install.sh`.
+
+### Secure Boot bloqueia o módulo
+
+Em máquinas com Secure Boot ativo, o `v4l2loopback` só carrega se o módulo
+estiver assinado — o erro aparece como *"Key was rejected by service"*. As
+saídas são assinar o módulo com uma chave MOK própria ou desativar o Secure
+Boot na UEFI. O CamLink detecta esse caso e mostra a orientação na própria
+tela.
+
+### scrcpy antigo demais
+
+O CamLink precisa de **scrcpy ≥ 4.0** para fontes Android. Câmeras RTSP
+funcionam sem ele. Debian, Ubuntu e derivados costumam empacotar versões bem
+anteriores; para instalar a oficial:
+
+```bash
+sudo ./installer/linux/install.sh --with-scrcpy
+```
+
+No Arch a versão dos repositórios já serve.
+
+### O celular aparece como incompatível
+
+O CamLink exige **Android 12+**, porque usa uma API de câmera que não existe
+antes disso. O motivo aparece ao lado do aparelho na lista.
+
+### O Firefox não encontra a câmera (Linux)
+
+Algumas versões do Firefox no Linux não enumeram dispositivos
+`v4l2loopback`. O CamLink oferece abrir o Firefox com uma camada de
+compatibilidade que resolve isso.
+
+### A câmera some do OBS ao girar ou trocar de câmera (Linux)
+
+Comportamento conhecido, com explicação e contorno em
+[Limitações conhecidas](#limitações-conhecidas).
+
+### Só consigo uma captura RAW por vez
+
+É proposital: um segundo pedido enquanto o primeiro roda é recusado com
+`BUSY`. Espere o job atual terminar.
 
 ## Privacidade
 
@@ -123,6 +303,48 @@ no instalador; o projeto não os modifica.
   preview concorrente) não reproduziram em testes isolados — o disparo real
   parece exigir o padrão de uso completo do app. **Ainda sem decisão de
   como tratar definitivamente; será decidido antes da versão release.**
+
+## Contribuindo
+
+Veja [CONTRIBUTING.md](CONTRIBUTING.md) para o fluxo de PRs e issues.
+
+### Stack
+
+- **Backend**: Rust (Tauri 2.x) — `src-tauri/`
+- **UI**: SvelteKit — `src/`
+- **Android**: fork do [scrcpy](https://github.com/Genymobile/scrcpy)-server
+  (Java 17, submodule em `scrcpy/`, branch `camlink`)
+- **Runtime**: adb, scrcpy ≥ 4.0, ffmpeg, v4l2loopback ≥ 0.13 (Linux),
+  filtro DirectShow próprio (Windows — sem driver de terceiros)
+
+### Compilando do código-fonte
+
+Pré-requisitos: `rustup`, `pnpm` e as bibliotecas de sistema do Tauri
+(`webkit2gtk-4.1`, `gtk3`, `librsvg` no Linux).
+
+```bash
+git clone --recurse-submodules https://github.com/Wolfloiz/CamLink.git
+cd CamLink
+pnpm install
+pnpm tauri dev          # roda em modo desenvolvimento
+pnpm tauri build        # gera os instaladores da plataforma atual
+```
+
+O `pnpm tauri build` precisa dos binários de terceiros vendorizados antes:
+`installer/linux/vendor.sh` (Linux) ou `installer/windows/vendor.ps1`
+(Windows). Para apenas compilar ou rodar os testes, o modo stub basta e não
+baixa nada:
+
+```bash
+./installer/linux/vendor.sh --stub
+```
+
+Gates de qualidade (obrigatórios, ver `.specify/memory/constitution.md`):
+
+```bash
+cd src-tauri
+cargo fmt --check && cargo clippy -- -D warnings && cargo test
+```
 
 ## Licença
 
