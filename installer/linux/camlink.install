@@ -1,29 +1,60 @@
 # Mensagens e ganchos pós-instalação do pacote Arch (T066).
-# Faz o que o install.sh faria: recarrega o udev, carrega o módulo e avisa
-# sobre o grupo `video` (o pacote não pode adivinhar qual usuário é o dono
-# da sessão).
+#
+# Paridade com o deb-postinst.sh: o que um pacote consegue resolver sozinho,
+# resolve — recarrega o udev, carrega o módulo, conserta o dono do node que
+# já existia e põe no grupo `video` o usuário real por trás do sudo/pkexec.
+# Só cai na instrução manual quando não dá para descobrir quem é esse
+# usuário (instalação direto de um shell de root, chroot, imagem).
 
 _post() {
   udevadm control --reload-rules 2>/dev/null || true
   udevadm trigger --subsystem-match=video4linux 2>/dev/null || true
   modprobe v4l2loopback 2>/dev/null || true
-  cat <<'MSG'
 
-CamLink instalado. Falta um passo manual, uma única vez:
+  # A regra udev só vale para um device criado depois dela; se o módulo já
+  # estava carregado, o node existente continua root:root.
+  if [ -e /dev/v4l2loopback ]; then
+    chgrp video /dev/v4l2loopback 2>/dev/null || true
+    chmod 0660 /dev/v4l2loopback 2>/dev/null || true
+  fi
 
-    sudo usermod -aG video $USER      # e faça logout/login
+  # Usuário real por trás do sudo/pkexec. Os helpers de AUR (yay, paru)
+  # chamam o pacman via sudo, e as lojas gráficas (pamac, gnome-software)
+  # via polkit — os dois casos são cobertos.
+  _user="${SUDO_USER:-}"
+  if [ -z "$_user" ] && [ -n "${PKEXEC_UID:-}" ]; then
+    _user="$(getent passwd "$PKEXEC_UID" | cut -d: -f1)"
+  fi
 
-Sem isso o app não consegue criar a câmera virtual (/dev/v4l2loopback é do
-grupo video). Confira o estado com:
+  if [ -n "$_user" ] && [ "$_user" != "root" ]; then
+    if id -nG "$_user" 2>/dev/null | tr ' ' '\n' | grep -qx video; then
+      echo "CamLink: '$_user' já está no grupo video."
+    else
+      usermod -aG video "$_user" || true
+      echo "CamLink: '$_user' adicionado ao grupo video — faça logout/login para valer."
+    fi
+  else
+    cat <<'MSG'
 
-    /usr/share/camlink/install.sh --check
+CamLink: não foi possível descobrir o usuário da sessão (instalação como
+root?). Adicione-o ao grupo video manualmente, uma única vez:
 
+    sudo usermod -aG video SEU_USUARIO      # e faça logout/login
+
+Sem isso o app não consegue criar a câmera virtual: /dev/v4l2loopback
+pertence ao grupo video.
 MSG
+  fi
+
+  echo "CamLink: diagnóstico completo em /usr/share/camlink/install.sh --check"
 }
 
 post_install() { _post; }
 post_upgrade() { _post; }
 
 post_remove() {
+  # Não removemos ninguém do grupo `video` nem descarregamos o módulo:
+  # outros programas (OBS, navegadores, outras webcams virtuais) dependem
+  # dos dois. Mesmo critério do deb-postrm.sh.
   udevadm control --reload-rules 2>/dev/null || true
 }
