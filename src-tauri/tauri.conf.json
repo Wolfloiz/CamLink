@@ -24,12 +24,6 @@
   "bundle": {
     "active": true,
     "targets": ["deb", "appimage", "nsis", "msi"],
-    "publisher": "CamLink",
-    "homepage": "https://github.com/luizhfmonteiro/camlink",
-    "license": "GPL-3.0-or-later",
-    "category": "Video",
-    "shortDescription": "Câmeras Android e IP como webcams virtuais",
-    "longDescription": "CamLink transforma câmeras de celulares Android (via USB/ADB, sem instalar nada no aparelho) e fontes IP/RTSP em webcams virtuais, usáveis em OBS, Chrome, Firefox e Discord. Inclui controles em tempo real (zoom, foco, exposição, modos) e múltiplas fontes simultâneas.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

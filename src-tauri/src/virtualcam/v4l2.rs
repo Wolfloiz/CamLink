@@ -163,46 +163,6 @@ pub fn detect_secure_boot_block(stderr: &str) -> Option<AppError> {
     }
 }
 
-/// Detecta falha ao abrir `/dev/v4l2loopback` — os dois modos de falha do
-/// instalador Linux (T066). O `v4l2loopback-ctl` reporta ambos com o mesmo
-/// prefixo (`perror("unable to open control device …")`), o que muda é o
-/// `strerror`: `Permission denied` = udev rule ausente ou usuário fora do
-/// grupo `video` (típico logo depois de instalar, antes de relogar);
-/// `No such file or directory` = módulo não carregado (`modules-load.d`
-/// ausente ou boot sem o módulo).
-pub fn detect_control_device_block(stderr: &str) -> Option<AppError> {
-    let lower = stderr.to_lowercase();
-    if !lower.contains("unable to open control device") {
-        return None;
-    }
-    if lower.contains("permission denied") {
-        return Some(
-            AppError::new(
-                "v4l2_permission_denied",
-                "Sem permissão para criar a câmera virtual (/dev/v4l2loopback)",
-            )
-            .with_hint(
-                "Seu usuário precisa estar no grupo `video` e a regra udev do CamLink \
-                 instalada. Rode `installer/linux/install.sh` e faça logout/login \
-                 (ou `newgrp video`) para o grupo valer na sessão.",
-            ),
-        );
-    }
-    if lower.contains("no such file") {
-        return Some(
-            AppError::new(
-                "v4l2_module_not_loaded",
-                "O módulo v4l2loopback não está carregado",
-            )
-            .with_hint(
-                "Carregue com `sudo modprobe v4l2loopback`. Para persistir no boot, \
-                 rode `installer/linux/install.sh` (instala o modules-load.d).",
-            ),
-        );
-    }
-    None
-}
-
 // ---------------------------------------------------------------------------
 // V4l2Backend
 // ---------------------------------------------------------------------------
@@ -317,9 +277,7 @@ impl V4l2Backend {
             .map_err(|e| VcamError::Backend(format!("falha ao executar v4l2loopback-ctl: {e}")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if let Some(err) =
-                detect_secure_boot_block(&stderr).or_else(|| detect_control_device_block(&stderr))
-            {
+            if let Some(err) = detect_secure_boot_block(&stderr) {
                 return Err(VcamError::Backend(err.msg));
             }
             return Err(VcamError::Backend(format!(

@@ -13,7 +13,6 @@ pub mod device_manager;
 pub mod error;
 pub mod frame_transform;
 pub mod model;
-pub mod paths;
 pub mod preview;
 pub mod procutil;
 pub mod raw_manager;
@@ -120,13 +119,16 @@ fn find_server_jar_next_to_scrcpy_binary() -> Option<PathBuf> {
     })
 }
 
-// Diretório onde o instalador coloca os binários vendorizados
-// (`bundle.resources`): `<exe>\bin\` no Windows (T067),
-// `/usr/lib/CamLink/bin/` no `.deb` e `$APPDIR/usr/lib/CamLink/bin/` no
-// AppImage (T066) — ver `paths::bin_dir_candidates`. `None` em dev (nenhum
-// layout de instalação bate), o que faz `bundled_path` cair no fallback de
-// PATH abaixo sem mudar o comportamento de `cargo tauri dev`.
-use paths::bundled_bin_dir;
+/// Diretório onde o instalador Windows (T067) coloca os binários
+/// vendorizados (`bundle.resources` de `tauri.windows.conf.json`) — mesmo
+/// diretório do `.exe` instalado, subpasta `bin/`. `None` em dev (não existe
+/// fora de uma instalação real via NSIS/MSI), o que faz `bundled_path` cair
+/// no fallback de PATH abaixo sem mudar o comportamento de
+/// `cargo tauri dev`.
+fn bundled_bin_dir() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.join("bin");
+    dir.is_dir().then_some(dir)
+}
 
 /// `filename` procurado tal qual dentro de `bundled_bin_dir()` (sem mexer
 /// em extensão — pro jar do scrcpy-server, que não tem `.exe`).
@@ -1918,22 +1920,9 @@ pub fn run() {
     tauri::async_runtime::set(runtime.handle().clone());
     let _runtime_guard = runtime.enter();
 
-    let external = resolve_external_paths();
-    tracing::info!(
-        adb = %external.adb.display(),
-        scrcpy = %external.scrcpy.display(),
-        ffmpeg = %external.ffmpeg.display(),
-        server_jar = %external.server_jar.display(),
-        "binários externos resolvidos"
-    );
-    // Achado ao validar o instalador Linux (T066): o polling de dispositivos
-    // usava um `PathBuf::from("adb")` fixo, ou seja, PATH — ignorando o adb
-    // que o instalador embute (`bundle.resources`, T067/T066). Numa máquina
-    // limpa, sem adb no PATH, nenhum celular era detectado apesar de o
-    // binário estar instalado junto com o app (FR-024).
-    let adb_path = external.adb.clone();
+    let adb_path = PathBuf::from("adb");
     runtime.spawn(cleanup_stale_forwards());
-    let stream_manager = StreamManager::new(external);
+    let stream_manager = StreamManager::new(resolve_external_paths());
     let rtsp_sessions: Arc<TokioMutex<HashMap<Uuid, RtspRuntime>>> =
         Arc::new(TokioMutex::new(HashMap::new()));
     let vcam: Arc<StdMutex<Box<dyn VirtualCameraBackend + Send>>> =

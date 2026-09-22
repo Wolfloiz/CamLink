@@ -18,7 +18,6 @@ default-run = "camlink"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
-fake-backend = []
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
@@ -56,12 +55,6 @@ base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
-# Dependência de dev do crate nele mesmo: é o jeito estável de ligar uma
-# feature só nos builds de teste. Liga `fake-backend`, que é o
-# `required-features` do [[bin]] fake_backend — assim `cargo test` continua
-# construindo o binário fake (CARGO_BIN_EXE_fake_backend) e
-# `cargo build --release` (o do instalador) não.
-camlink = { path = ".", features = ["fake-backend"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service"] }
@@ -98,5 +91,4 @@ name = "fake_backend"
 path = "tests/bin/fake_backend.rs"
 test = false
 doc = false
-required-features = ["fake-backend"]
 
