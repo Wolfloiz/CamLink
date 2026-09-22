@@ -576,8 +576,8 @@
   }
 
   .brand-dot {
-    width: 12px;
-    height: 12px;
+    width: 0.75rem;
+    height: 0.75rem;
     border-radius: 50%;
     background: var(--accent);
   }
@@ -596,16 +596,16 @@
   .layout {
     flex: 1;
     display: grid;
-    grid-template-columns: 380px 1fr;
+    grid-template-columns: 23.75rem 1fr;
     gap: 1.5rem;
     padding: 1.5rem;
-    max-width: 1600px;
+    max-width: 100rem;
     width: 100%;
     margin: 0 auto;
     align-items: start;
   }
 
-  @media (max-width: 900px) {
+  @media (max-width: 56.25rem) {
     .layout {
       grid-template-columns: 1fr;
     }
@@ -731,8 +731,8 @@
   }
 
   .rec-dot {
-    width: 9px;
-    height: 9px;
+    width: 0.5625rem;
+    height: 0.5625rem;
     border-radius: 50%;
     background: white;
     animation: pulse 1.4s ease-in-out infinite;
