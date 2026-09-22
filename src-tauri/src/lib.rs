@@ -654,6 +654,25 @@ async fn connect_control_with_retry(
 /// Garante o canal de controle da sessão: `adb forward tcp:0` (porta
 /// efêmera alocada pelo adb) + handshake `hello`. Reaproveitado entre
 /// comandos; morre junto com o subprocess (restart limpa `ctx.control`).
+/// Cliente de controle da sessão, já conectado.
+///
+/// Existe para os quatro chamadores que rodam `ensure_control(...).await?`
+/// e precisam do cliente logo em seguida. Antes cada um fazia
+/// `ctx.control.as_mut().expect("ensure_control garantiu")` — o `expect`
+/// era são (todo caminho `Ok` de `ensure_control` preenche `ctx.control`),
+/// mas dependia de uma invariante a ~70 linhas de distância, repetida em
+/// quatro lugares. Aqui ela fica explícita e, se algum refactor futuro
+/// quebrá-la, o usuário recebe um erro acionável em vez de um pânico.
+fn control_mut(ctx: &mut SessionCtx) -> Result<&mut camera_controller::ControlClient, AppError> {
+    ctx.control.as_mut().ok_or_else(|| {
+        AppError::new(
+            "control_indisponivel",
+            "O canal de controle da câmera não está conectado",
+        )
+        .with_hint("Pare e inicie a transmissão novamente.")
+    })
+}
+
 async fn ensure_control(
     app: &AppHandle,
     session_id: Uuid,
@@ -800,7 +819,7 @@ async fn get_capabilities(
             .with_hint("Inicie a transmissão antes de consultar os controles.")
         })?;
     ensure_control(&app, *session_id, ctx).await?;
-    let client = ctx.control.as_mut().expect("ensure_control garantiu");
+    let client = control_mut(ctx)?;
     let reply = get_capabilities_with_retry(client).await;
     let reply = match reply {
         Ok(reply) => reply,
@@ -874,7 +893,7 @@ async fn set_control(
         ControlChange::Torch(enabled) => ControlRequest::SetTorch { enabled: *enabled },
         ControlChange::Rotation(_) | ControlChange::Mirror(_) => unreachable!(),
     };
-    let client = ctx.control.as_mut().expect("ensure_control garantiu");
+    let client = control_mut(ctx)?;
     let reply = client.request(request).await.map_err(|e| {
         // Canal morto (ex.: subprocess reiniciou): derruba o cliente pra
         // reconectar no próximo comando.
@@ -1268,7 +1287,7 @@ async fn raw_snapshot(
         let ctx = sessions
             .get_mut(&session_id)
             .ok_or_else(|| AppError::new("session_not_found", "Sessão não encontrada"))?;
-        let client = ctx.control.as_mut().expect("ensure_control garantiu");
+        let client = control_mut(ctx)?;
         client
             .request(ControlRequest::RawSnapshot)
             .await
@@ -1355,7 +1374,7 @@ async fn raw_sequence_start(
         let ctx = sessions
             .get_mut(&session_id)
             .ok_or_else(|| AppError::new("session_not_found", "Sessão não encontrada"))?;
-        let client = ctx.control.as_mut().expect("ensure_control garantiu");
+        let client = control_mut(ctx)?;
         client
             .request(ControlRequest::RawSequenceStart { fps })
             .await
