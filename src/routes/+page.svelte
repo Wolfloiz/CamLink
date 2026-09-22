@@ -496,7 +496,13 @@
 <style>
   :root {
     font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-    color: #14151a;
+    /* Declara que a UI existe nos dois temas. Sem isto o WebKit/Chromium
+       desenha TODO controle nativo — o <select> e o popup de <option> —
+       em modo claro mesmo com a página escura, que era a causa dos
+       dropdowns aparecerem como caixas claras no meio da UI escura. */
+    color-scheme: light dark;
+    --text: #14151a;
+    color: var(--text);
     background-color: #f6f6f4;
     --accent: #6d5cf5;
     --accent-hover: #5b4ae0;
@@ -507,12 +513,44 @@
 
   @media (prefers-color-scheme: dark) {
     :root {
-      color: #f0f0f2;
+      --text: #f0f0f2;
       background-color: #202127;
       --card-bg: #2a2b33;
       --card-border: rgba(255, 255, 255, 0.08);
       --muted: rgba(240, 240, 242, 0.6);
     }
+  }
+
+  /* O projeto não tinha reset: `box-sizing` era content-box e o <body>
+     mantinha a `margin: 8px` do user-agent. Com isso
+     `.layout { width: 100%; padding: 1.5rem }` resolvia para 48px A MAIS
+     que o container, e a página transbordava 40px na horizontal em
+     QUALQUER largura — só ficava evidente em janela estreita. */
+  :global(*),
+  :global(*::before),
+  :global(*::after) {
+    box-sizing: border-box;
+  }
+
+  :global(body) {
+    margin: 0;
+  }
+
+  /* Global de propósito: o <select> de balanço de branco vive em
+     CameraControls.svelte, e como o Svelte escopa estilo por componente,
+     a regra local que existia aqui nunca o alcançava — aquele dropdown
+     ficava sem estilo nenhum, diferente dos outros quatro. */
+  :global(select) {
+    padding: 0.45rem 0.6rem;
+    border-radius: 8px;
+    border: 1px solid var(--card-border);
+    /* `transparent` deixava a UA pintar o próprio fundo claro. */
+    background: var(--card-bg);
+    /* `inherit` puxava o --muted do <label>: quem é secundário é o
+       rótulo; o valor escolhido é conteúdo primário. */
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.875rem;
   }
 
   .app {
@@ -660,15 +698,6 @@
     gap: 0.3rem;
     font-size: 0.85em;
     color: var(--muted);
-  }
-
-  select {
-    padding: 0.45rem 0.6rem;
-    border-radius: 8px;
-    border: 1px solid var(--card-border);
-    background: transparent;
-    color: inherit;
-    font-size: 0.9em;
   }
 
   .hint {
