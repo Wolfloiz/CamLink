@@ -50,8 +50,8 @@ use windows::core::{
 };
 
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_POINTER, E_UNEXPECTED,
-    HANDLE, HMODULE, S_FALSE, S_OK,
+    CloseHandle, GetLastError, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER,
+    E_UNEXPECTED, HANDLE, HMODULE, S_FALSE, S_OK,
 };
 use windows::Win32::Foundation::{SIZE, WIN32_ERROR};
 use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
@@ -227,6 +227,12 @@ impl FrameHub {
     /// Lê o cabeçalho atual sem consumir/copiar o frame (usado para
     /// negociação de media type, onde só width/height/fps importam).
     fn peek_header(&self) -> SharedHeader {
+        // SAFETY: `header_ptr` aponta para o início do view mapeado, que
+        // tem pelo menos HEADER_SIZE bytes por construção (`connect`). A
+        // leitura acontece sob o mutex nomeado, então não corre com o
+        // `write_frame` do outro processo. `SharedHeader` é `repr(C)` só
+        // de inteiros: qualquer padrão de bits é um valor válido, inclusive
+        // a região zerada de uma seção recém-criada.
         unsafe {
             let _ = WaitForSingleObject(self.mutex, INFINITE);
             let header = *self.header_ptr();
@@ -239,26 +245,39 @@ impl FrameHub {
     /// retorna o novo cabeçalho (leitor: worker thread dentro do processo
     /// consumidor).
     fn read_if_newer(&self, last_seen: u64, out: &mut Vec<u8>) -> Option<SharedHeader> {
+        // SAFETY: `header_ptr`/`data_ptr` ficam dentro do view mapeado
+        // (REGION_SIZE = HEADER_SIZE + FRAME_MAX_BYTES) e todo acesso está
+        // sob o mutex nomeado, então o produtor não escreve durante a
+        // cópia. `frame_len` vem da memória COMPARTILHADA, ou seja de fora
+        // deste processo: `write_frame` limita a FRAME_MAX_BYTES, mas o
+        // leitor não pode depender disso — um escritor de outra versão (ou
+        // uma região corrompida) faria `from_raw_parts` ler além do view.
+        // Daí o clamp abaixo, que é o que torna este bloco são.
         unsafe {
             let _ = WaitForSingleObject(self.mutex, INFINITE);
             let header = *self.header_ptr();
-            if header.sequence == last_seen || header.frame_len == 0 {
+            let len = (header.frame_len as usize).min(FRAME_MAX_BYTES);
+            if header.sequence == last_seen || len == 0 {
                 let _ = ReleaseMutex(self.mutex);
                 return None;
             }
             out.clear();
-            out.extend_from_slice(core::slice::from_raw_parts(
-                self.data_ptr(),
-                header.frame_len as usize,
-            ));
+            out.extend_from_slice(core::slice::from_raw_parts(self.data_ptr(), len));
             let _ = ReleaseMutex(self.mutex);
-            Some(header)
+            Some(SharedHeader {
+                frame_len: len as u32,
+                ..header
+            })
         }
     }
 }
 
 impl Drop for FrameHub {
     fn drop(&mut self) {
+        // SAFETY: `view`, `mapping` e `mutex` vieram de `connect` e são
+        // exclusivos deste FrameHub — `Drop` roda uma única vez, então
+        // nenhum deles é desmapeado ou fechado duas vezes. Depois daqui a
+        // struct não é mais acessível.
         unsafe {
             let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
                 Value: self.view as *mut c_void,
@@ -288,12 +307,27 @@ fn current_video_params() -> (u32, u32, u32) {
     }
 }
 
-fn build_media_type_for(width: u32, height: u32, fps: u32) -> AM_MEDIA_TYPE {
+/// `None` se o `CoTaskMemAlloc` do bloco de formato falhar.
+///
+/// Antes disto havia um `assert!` aqui. Num filtro DirectShow o `assert!` é
+/// especialmente ruim: este código roda DENTRO do processo consumidor
+/// (`obs64.exe`, `chrome.exe`) e o pânico atravessaria a fronteira COM, que
+/// o Rust transforma em abort — derrubando o programa do usuário por uma
+/// falha de alocação nossa. Melhor devolver `E_OUTOFMEMORY` e deixar o
+/// consumidor seguir sem a câmera.
+fn build_media_type_for(width: u32, height: u32, fps: u32) -> Option<AM_MEDIA_TYPE> {
     let frame_size = rgb24_len(width, height);
+    // SAFETY: `pb` é conferido contra null logo abaixo; a partir daí aponta
+    // para `size_of::<VIDEOINFOHEADER>()` bytes recém-alocados e exclusivos
+    // desta função, zerados por `write_bytes` antes de qualquer leitura. A
+    // posse passa para o `AM_MEDIA_TYPE` devolvido, cujo `pbFormat` é
+    // liberado por `free_media_type_format`.
     unsafe {
         let cb = size_of::<VIDEOINFOHEADER>();
         let pb = CoTaskMemAlloc(cb) as *mut u8;
-        assert!(!pb.is_null(), "CoTaskMemAlloc falhou");
+        if pb.is_null() {
+            return None;
+        }
         let vih = pb as *mut VIDEOINFOHEADER;
         core::ptr::write_bytes(vih, 0, 1);
         (*vih).AvgTimePerFrame = 10_000_000 / i64::from(fps.max(1));
@@ -305,7 +339,7 @@ fn build_media_type_for(width: u32, height: u32, fps: u32) -> AM_MEDIA_TYPE {
         (*vih).bmiHeader.biCompression = 0; // BI_RGB
         (*vih).bmiHeader.biSizeImage = frame_size as u32;
 
-        AM_MEDIA_TYPE {
+        Some(AM_MEDIA_TYPE {
             majortype: MEDIATYPE_Video,
             subtype: MEDIASUBTYPE_RGB24,
             bFixedSizeSamples: BOOL::from(true),
@@ -315,16 +349,42 @@ fn build_media_type_for(width: u32, height: u32, fps: u32) -> AM_MEDIA_TYPE {
             pUnk: core::mem::ManuallyDrop::new(None),
             cbFormat: cb as u32,
             pbFormat: pb,
-        }
+        })
     }
 }
 
-fn build_media_type() -> AM_MEDIA_TYPE {
+fn build_media_type() -> Option<AM_MEDIA_TYPE> {
     let (w, h, fps) = current_video_params();
     build_media_type_for(w, h, fps)
 }
 
+/// Aloca uma cópia de `mt` com `CoTaskMemAlloc` (a convenção COM para
+/// out-params de media type: quem chama libera com `CoTaskMemFree`).
+/// `None` se a alocação falhar — ver nota em `build_media_type_for` sobre
+/// por que isto não pode entrar em pânico.
+fn alloc_media_type_copy(mt: AM_MEDIA_TYPE) -> Option<*mut AM_MEDIA_TYPE> {
+    // SAFETY: `dst` é conferido contra null antes do `write`, e aponta para
+    // `size_of::<AM_MEDIA_TYPE>()` bytes recém-alocados e ainda não
+    // publicados para ninguém. `write` (e não `*dst =`) é o correto aqui:
+    // a memória está NÃO INICIALIZADA e uma atribuição normal tentaria
+    // dropar o valor anterior inexistente.
+    unsafe {
+        let dst = CoTaskMemAlloc(size_of::<AM_MEDIA_TYPE>()) as *mut AM_MEDIA_TYPE;
+        if dst.is_null() {
+            free_media_type_format(&mt);
+            return None;
+        }
+        dst.write(mt);
+        Some(dst)
+    }
+}
+
 fn free_media_type_format(mt: &AM_MEDIA_TYPE) {
+    // SAFETY: `pbFormat`, quando não-nulo, sempre veio de um
+    // `CoTaskMemAlloc` feito em `build_media_type_for` — é o alocador
+    // correspondente ao `CoTaskMemFree`. Cada chamador libera um media type
+    // que ainda possui; os que passam a posse ao COM (via
+    // `alloc_media_type_copy`) não chamam esta função.
     unsafe {
         if !mt.pbFormat.is_null() {
             CoTaskMemFree(Some(mt.pbFormat as *const c_void));
@@ -620,6 +680,11 @@ fn push_sample(
         // buffer do allocator.
         return;
     }
+    // SAFETY: `allocator` e `mem_input` são interfaces COM vivas (mantidas
+    // em `Inner` enquanto a worker thread roda). O `GetPointer` devolve o
+    // buffer da amostra e a cópia é limitada pelo `min` entre `GetSize()` e
+    // o tamanho do frame, então não escreve além do buffer do allocator. A
+    // amostra é devolvida ao pool quando `sample` sai de escopo.
     unsafe {
         let mut sample = None;
         let hr = allocator.GetBuffer(&mut sample, None, None, 0);
@@ -661,6 +726,15 @@ impl IEnumMediaTypes_Impl for SingleMediaTypeEnum_Impl {
         ppmediatypes: *mut *mut AM_MEDIA_TYPE,
         pcfetched: *mut u32,
     ) -> HRESULT {
+        // `ppmediatypes` é out-param obrigatório do contrato COM. O irmão
+        // `SinglePinEnum::Next` já devolvia E_POINTER no equivalente; aqui
+        // faltava, e escrevia direto em ponteiro do chamador.
+        if ppmediatypes.is_null() {
+            return E_POINTER;
+        }
+        // SAFETY: `ppmediatypes` conferido acima; `pcfetched` é opcional
+        // por contrato e conferido antes de cada escrita. Ambos apontam
+        // para um elemento gravável enquanto durar a chamada.
         unsafe {
             let mut done = self.done.lock().unwrap();
             if *done || cmediatypes == 0 {
@@ -669,10 +743,16 @@ impl IEnumMediaTypes_Impl for SingleMediaTypeEnum_Impl {
                 }
                 return S_FALSE;
             }
+            let Some(mt) = build_media_type() else {
+                return E_OUTOFMEMORY;
+            };
+            let Some(dst) = alloc_media_type_copy(mt) else {
+                return E_OUTOFMEMORY;
+            };
+            // Só marca consumido depois que as duas alocações deram certo:
+            // senão uma falha de memória "queimaria" o enumerador e o
+            // consumidor nunca mais veria o formato.
             *done = true;
-            let mt = build_media_type();
-            let dst = CoTaskMemAlloc(size_of::<AM_MEDIA_TYPE>()) as *mut AM_MEDIA_TYPE;
-            dst.write(mt);
             *ppmediatypes = dst;
             if !pcfetched.is_null() {
                 *pcfetched = 1;
@@ -729,6 +809,10 @@ struct SinglePinEnum {
 impl IEnumPins_Impl for SinglePinEnum_Impl {
     fn Next(&self, cpins: u32, pppins: *mut Option<IPin>, pcfetched: *mut u32) -> HRESULT {
         let mut index = self.index.lock().unwrap();
+        // SAFETY: `pppins` é conferido contra null antes da escrita (logo
+        // abaixo) e `pcfetched` é opcional por contrato, conferido antes de
+        // cada uso. Ambos apontam para um elemento gravável do chamador
+        // enquanto durar a chamada.
         unsafe {
             if cpins == 0 || *index >= 1 {
                 if !pcfetched.is_null() {
@@ -783,6 +867,10 @@ struct VCamPin {
 
 impl VCamPin_Impl {
     fn negotiate_allocator(&self, downstream: &IPin) -> WinResult<()> {
+        // SAFETY: só chamadas a interfaces COM vivas — `downstream` é uma
+        // referência válida fornecida pelo grafo, e o allocator resultante
+        // (dele ou criado por CoCreateInstance) é mantido em `Inner`. As
+        // `ALLOCATOR_PROPERTIES` são pilha nossa, preenchidas antes do uso.
         unsafe {
             let mem_input: IMemInputPin = downstream.cast()?;
             let (_, _, fps) = current_video_params();
@@ -817,7 +905,13 @@ impl IPin_Impl for VCamPin_Impl {
         let Some(downstream) = preceivepin.as_ref() else {
             return Err(E_POINTER.into());
         };
-        let mt = build_media_type();
+        let Some(mt) = build_media_type() else {
+            return Err(E_OUTOFMEMORY.into());
+        };
+        // SAFETY: `mt` é nosso e vive até o fim desta função; `QueryAccept`
+        // só lê o media type durante a chamada (não retém o ponteiro), e o
+        // bloco de formato é liberado por `free_media_type_format` nos dois
+        // caminhos de saída abaixo.
         let accept_hr = unsafe { downstream.QueryAccept(&mt) };
         if accept_hr.is_err() {
             free_media_type_format(&mt);
@@ -827,6 +921,10 @@ impl IPin_Impl for VCamPin_Impl {
         // retornam E_POINTER se receberem None (auto-referência guardada em
         // `self_pin`).
         let self_pin = self.inner.self_pin.lock().unwrap().clone();
+        // SAFETY: `mt` é nosso e vive até o `free_media_type_format` da
+        // linha seguinte; `ReceiveConnection` copia o que precisa durante a
+        // chamada e não retém o ponteiro. `self_pin` é a auto-referência
+        // guardada em `Inner`, viva enquanto o filtro existir.
         let recv = unsafe { downstream.ReceiveConnection(self_pin.as_ref(), &mt) };
         free_media_type_format(&mt);
         recv?;
@@ -849,6 +947,9 @@ impl IPin_Impl for VCamPin_Impl {
         *self.inner.peer.lock().unwrap() = None;
         self.inner.mem_input.lock().unwrap().take();
         if let Some(alloc) = self.inner.allocator.lock().unwrap().take() {
+            // SAFETY: `alloc` é uma interface COM viva, retirada de `Inner`
+            // agora — ninguém mais a usa depois do `take`. `Decommit` é
+            // idempotente e pode falhar sem consequência aqui.
             unsafe {
                 let _ = alloc.Decommit();
             }
@@ -866,17 +967,36 @@ impl IPin_Impl for VCamPin_Impl {
     }
 
     fn ConnectionMediaType(&self, pmt: *mut AM_MEDIA_TYPE) -> WinResult<()> {
+        if pmt.is_null() {
+            return Err(E_POINTER.into());
+        }
         if self.inner.peer.lock().unwrap().is_none() {
             return Err(E_UNEXPECTED.into());
         }
+        let Some(mt) = build_media_type() else {
+            return Err(E_OUTOFMEMORY.into());
+        };
+        // SAFETY: `pmt` conferido contra null; por contrato do COM aponta
+        // para um AM_MEDIA_TYPE gravável do chamador. `write` e não
+        // `*pmt =` porque a estrutura do chamador pode estar NÃO
+        // inicializada — a atribuição normal tentaria dropar um valor
+        // anterior (`pUnk`) que não existe.
         unsafe {
-            *pmt = build_media_type();
+            pmt.write(mt);
         }
         Ok(())
     }
 
     fn QueryPinInfo(&self, pinfo: *mut PIN_INFO) -> WinResult<()> {
+        if pinfo.is_null() {
+            return Err(E_POINTER.into());
+        }
         let filter = self.inner.self_filter.lock().unwrap().clone();
+        // SAFETY: `pinfo` conferido contra null, aponta para um PIN_INFO
+        // gravável do chamador. `pFilter` é ManuallyDrop, então a
+        // atribuição não tenta dropar conteúdo anterior possivelmente não
+        // inicializado; a referência passa a ser do chamador, que libera.
+        // A cópia em `achName` é limitada pelo `min` com o tamanho do array.
         unsafe {
             (*pinfo).pFilter = core::mem::ManuallyDrop::new(filter);
             (*pinfo).dir = PINDIR_OUTPUT;
@@ -892,15 +1012,26 @@ impl IPin_Impl for VCamPin_Impl {
     }
 
     fn QueryId(&self) -> WinResult<windows::core::PWSTR> {
+        let id = "CamLinkVideoOut\0".encode_utf16().collect::<Vec<u16>>();
+        // SAFETY: `buf` é conferido contra null antes da cópia e aponta
+        // para `id.len() * 2` bytes recém-alocados — exatamente o tamanho
+        // copiado, com `id` (origem) e `buf` (destino) em regiões
+        // distintas. A posse do bloco passa para o chamador, que libera com
+        // CoTaskMemFree (convenção de IPin::QueryId).
         unsafe {
-            let id = "CamLinkVideoOut\0".encode_utf16().collect::<Vec<u16>>();
             let buf = CoTaskMemAlloc(id.len() * 2) as *mut u16;
+            if buf.is_null() {
+                return Err(E_OUTOFMEMORY.into());
+            }
             core::ptr::copy_nonoverlapping(id.as_ptr(), buf, id.len());
             Ok(windows::core::PWSTR(buf))
         }
     }
 
     fn QueryAccept(&self, pmt: *const AM_MEDIA_TYPE) -> HRESULT {
+        // SAFETY: `pmt` vem do chamador COM; o null é tratado antes do
+        // deref (curto-circuito do `||`). Quando não-nulo, aponta por
+        // contrato para um AM_MEDIA_TYPE inicializado e só é LIDO aqui.
         unsafe {
             if pmt.is_null() || !media_type_matches(&*pmt) {
                 return windows::Win32::Media::DirectShow::VFW_E_TYPE_NOT_ACCEPTED;
@@ -941,6 +1072,8 @@ impl IPin_Impl for VCamPin_Impl {
 
 impl IAMStreamConfig_Impl for VCamPin_Impl {
     fn SetFormat(&self, pmt: *const AM_MEDIA_TYPE) -> WinResult<()> {
+        // SAFETY: mesma garantia de `QueryAccept` — null tratado antes do
+        // deref pelo curto-circuito do `&&`, e o media type é só lido.
         unsafe {
             let ok = !pmt.is_null() && media_type_matches(&*pmt);
             if !ok {
@@ -950,17 +1083,18 @@ impl IAMStreamConfig_Impl for VCamPin_Impl {
         Ok(())
     }
     fn GetFormat(&self) -> WinResult<*mut AM_MEDIA_TYPE> {
-        unsafe {
-            let mt = build_media_type();
-            let dst = CoTaskMemAlloc(size_of::<AM_MEDIA_TYPE>()) as *mut AM_MEDIA_TYPE;
-            dst.write(mt);
-            Ok(dst)
-        }
+        let mt = build_media_type().ok_or_else(|| windows::core::Error::from(E_OUTOFMEMORY))?;
+        alloc_media_type_copy(mt).ok_or_else(|| windows::core::Error::from(E_OUTOFMEMORY))
     }
     fn GetNumberOfCapabilities(&self, picount: *mut i32, pisize: *mut i32) -> WinResult<()> {
+        if picount.is_null() || pisize.is_null() {
+            return Err(E_POINTER.into());
+        }
+        // SAFETY: os dois foram conferidos contra null e, por contrato do
+        // COM, apontam para um i32 gravável do chamador.
         unsafe {
-            *picount = 1;
-            *pisize = size_of::<VIDEO_STREAM_CONFIG_CAPS>() as i32;
+            picount.write(1);
+            pisize.write(size_of::<VIDEO_STREAM_CONFIG_CAPS>() as i32);
         }
         Ok(())
     }
@@ -973,11 +1107,21 @@ impl IAMStreamConfig_Impl for VCamPin_Impl {
         if iindex != 0 {
             return Err(E_INVALIDARG.into());
         }
+        if ppmt.is_null() {
+            return Err(E_POINTER.into());
+        }
         let (w, h, fps) = current_video_params();
+        let Some(mt) = build_media_type_for(w, h, fps) else {
+            return Err(E_OUTOFMEMORY.into());
+        };
+        let Some(dst) = alloc_media_type_copy(mt) else {
+            return Err(E_OUTOFMEMORY.into());
+        };
+        // SAFETY: `ppmt` conferido contra null. `pscc` é opcional por
+        // contrato e só é escrito quando não-nulo; o chamador garante que,
+        // quando fornecido, aponta para um bloco do tamanho devolvido por
+        // `GetNumberOfCapabilities` (size_of::<VIDEO_STREAM_CONFIG_CAPS>()).
         unsafe {
-            let mt = build_media_type_for(w, h, fps);
-            let dst = CoTaskMemAlloc(size_of::<AM_MEDIA_TYPE>()) as *mut AM_MEDIA_TYPE;
-            dst.write(mt);
             *ppmt = dst;
             if !pscc.is_null() {
                 let interval = 10_000_000 / i64::from(fps.max(1));
@@ -1039,6 +1183,14 @@ impl IKsPropertySet_Impl for VCamPin_Impl {
         cbpropdata: u32,
         pcbreturned: *mut u32,
     ) -> WinResult<()> {
+        if ppropdata.is_null() {
+            return Err(E_POINTER.into());
+        }
+        // SAFETY: `guidpropset` tem o null tratado antes do deref
+        // (curto-circuito do `||`). `ppropdata` foi conferido acima e o
+        // `cbpropdata` do chamador é validado contra size_of::<GUID>()
+        // antes da escrita, que é o que garante que o bloco comporta o
+        // GUID. `pcbreturned` é opcional por contrato.
         unsafe {
             if guidpropset.is_null()
                 || *guidpropset != AMPROPSETID_PIN
@@ -1058,6 +1210,8 @@ impl IKsPropertySet_Impl for VCamPin_Impl {
     }
 
     fn QuerySupported(&self, guidpropset: *const GUID, dwpropid: u32) -> WinResult<u32> {
+        // SAFETY: null tratado antes do deref pelo curto-circuito do `&&`;
+        // quando não-nulo o GUID é só lido.
         unsafe {
             if !guidpropset.is_null()
                 && *guidpropset == AMPROPSETID_PIN
@@ -1186,6 +1340,12 @@ impl IClassFactory_Impl for VCamClassFactory_Impl {
         let inner = Arc::clone(&vcam.inner);
         let filter: IBaseFilter = vcam.into();
         *inner.self_filter.lock().unwrap() = Some(filter.clone());
+        // SAFETY: `riid`/`ppvobject` vêm do COM, que garante um GUID
+        // legível e um slot de ponteiro gravável — é o contrato de
+        // `IClassFactory::CreateInstance`. `query` é a implementação de
+        // QueryInterface gerada pelo crate `windows` e faz a validação
+        // restante; `filter` está vivo aqui (a posse vai para o chamador
+        // via contagem de referência).
         unsafe { filter.query(riid, ppvobject).ok() }
     }
     fn LockServer(&self, _flock: BOOL) -> WinResult<()> {
@@ -1247,6 +1407,12 @@ fn guid_to_reg_string(g: &GUID) -> String {
     )
 }
 
+/// # Safety
+/// Não recebe ponteiro do chamador: `subpath`, `value_name` e `data` são
+/// `&str`, convertidos internamente por `wide()` para buffers UTF-16 que
+/// vivem até o fim da função. O `from_raw_parts` interno reinterpreta esse
+/// buffer próprio como bytes para o `RegSetValueExW`, com o tamanho exato
+/// (`len * 2`). É `unsafe fn` só por chamar APIs do Win32.
 unsafe fn reg_set_sz(
     parent: HKEY,
     subpath: &str,
@@ -1315,6 +1481,10 @@ unsafe fn set_filter_friendly_name(label: &str) -> Result<(), WIN32_ERROR> {
 }
 
 fn dll_path() -> WinResult<String> {
+    // SAFETY: `GetModuleHandleExW` com FROM_ADDRESS recebe o endereço de
+    // uma função desta própria DLL, que é um ponteiro válido para código
+    // carregado. `buf` tem 1024 u16 e o `len` devolvido é sempre <= esse
+    // tamanho, então o slice final está dentro dos limites.
     unsafe {
         // Handle DESTE módulo (a DLL), não do processo host — via
         // GetModuleHandleExW com o endereço desta própria função.
@@ -1494,6 +1664,9 @@ impl VirtualCameraBackend for DShowBackend {
         // o nome escolhido pelo usuário na próxima vez que reenumerar os
         // devices. Falha aqui não deve impedir a câmera de funcionar — só
         // loga, já que o nome fixo continua sendo um fallback válido.
+        // SAFETY: `set_filter_friendly_name` só escreve no registro a
+        // partir de um `&str` nosso; não recebe ponteiro do chamador (ver
+        // a seção Safety dela).
         if let Err(e) = unsafe { set_filter_friendly_name(label) } {
             tracing::warn!(%label, error = ?e, "falha ao atualizar FriendlyName no registro");
         }
