@@ -7,6 +7,7 @@
   import RawPanel from "$lib/RawPanel.svelte";
   import RtspPanel from "$lib/RtspPanel.svelte";
   import SourceGrid from "$lib/SourceGrid.svelte";
+  import ThemeToggle from "$lib/ThemeToggle.svelte";
   import {
     listDeviceNicknames,
     onControlState,
@@ -306,6 +307,7 @@
       <span class="brand-dot"></span>
       <span class="brand-name">CamLink</span>
     </div>
+    <ThemeToggle />
     <span class="source-count">{sources.length}/{MAX_CONCURRENT_SOURCES} fontes ativas</span>
   </header>
 
@@ -496,7 +498,13 @@
 <style>
   :root {
     font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-    color: #14151a;
+    /* Declara que a UI existe nos dois temas. Sem isto o WebKit/Chromium
+       desenha TODO controle nativo — o <select> e o popup de <option> —
+       em modo claro mesmo com a página escura, que era a causa dos
+       dropdowns aparecerem como caixas claras no meio da UI escura. */
+    color-scheme: light;
+    --text: #14151a;
+    color: var(--text);
     background-color: #f6f6f4;
     --accent: #6d5cf5;
     --accent-hover: #5b4ae0;
@@ -505,14 +513,64 @@
     --muted: rgba(20, 21, 26, 0.6);
   }
 
+  /* Escuro em duas situações, e o bloco precisa ser repetido porque uma
+     delas vive dentro de uma media query. A alternativa enxuta seria
+     `light-dark()`, com um token só — mas ela é Baseline 2024 e o
+     WebKitGTK do Ubuntu 22.04 (alvo do quickstart e do T071) é antigo
+     demais; se não suportar, TODOS os tokens caem de uma vez. */
+
+  /* 1. usuário escolheu escuro explicitamente */
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --text: #f0f0f2;
+    background-color: #202127;
+    --card-bg: #2a2b33;
+    --card-border: rgba(255, 255, 255, 0.08);
+    --muted: rgba(240, 240, 242, 0.6);
+  }
+
+  /* 2. o SO pede escuro E o usuário não fixou claro */
   @media (prefers-color-scheme: dark) {
-    :root {
-      color: #f0f0f2;
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --text: #f0f0f2;
       background-color: #202127;
       --card-bg: #2a2b33;
       --card-border: rgba(255, 255, 255, 0.08);
       --muted: rgba(240, 240, 242, 0.6);
     }
+  }
+
+  /* O projeto não tinha reset: `box-sizing` era content-box e o <body>
+     mantinha a `margin: 8px` do user-agent. Com isso
+     `.layout { width: 100%; padding: 1.5rem }` resolvia para 48px A MAIS
+     que o container, e a página transbordava 40px na horizontal em
+     QUALQUER largura — só ficava evidente em janela estreita. */
+  :global(*),
+  :global(*::before),
+  :global(*::after) {
+    box-sizing: border-box;
+  }
+
+  :global(body) {
+    margin: 0;
+  }
+
+  /* Global de propósito: o <select> de balanço de branco vive em
+     CameraControls.svelte, e como o Svelte escopa estilo por componente,
+     a regra local que existia aqui nunca o alcançava — aquele dropdown
+     ficava sem estilo nenhum, diferente dos outros quatro. */
+  :global(select) {
+    padding: 0.45rem 0.6rem;
+    border-radius: 8px;
+    border: 1px solid var(--card-border);
+    /* `transparent` deixava a UA pintar o próprio fundo claro. */
+    background: var(--card-bg);
+    /* `inherit` puxava o --muted do <label>: quem é secundário é o
+       rótulo; o valor escolhido é conteúdo primário. */
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.875rem;
   }
 
   .app {
@@ -524,6 +582,7 @@
   .topbar {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 1rem;
     padding: 1rem 1.5rem;
     border-bottom: 1px solid var(--card-border);
@@ -532,20 +591,22 @@
   .brand {
     display: flex;
     align-items: center;
+    /* empurra seletor de tema e contador para a direita; antes quem fazia
+       isso era o `margin-left: auto` do contador, que agora tem vizinho */
+    margin-right: auto;
     gap: 0.5rem;
     font-weight: 700;
     font-size: 1.1rem;
   }
 
   .brand-dot {
-    width: 12px;
-    height: 12px;
+    width: 0.75rem;
+    height: 0.75rem;
     border-radius: 50%;
     background: var(--accent);
   }
 
   .source-count {
-    margin-left: auto;
     font-size: 0.8em;
     font-weight: 600;
     color: var(--muted);
@@ -558,16 +619,16 @@
   .layout {
     flex: 1;
     display: grid;
-    grid-template-columns: 380px 1fr;
+    grid-template-columns: 23.75rem 1fr;
     gap: 1.5rem;
     padding: 1.5rem;
-    max-width: 1600px;
+    max-width: 100rem;
     width: 100%;
     margin: 0 auto;
     align-items: start;
   }
 
-  @media (max-width: 900px) {
+  @media (max-width: 56.25rem) {
     .layout {
       grid-template-columns: 1fr;
     }
@@ -662,15 +723,6 @@
     color: var(--muted);
   }
 
-  select {
-    padding: 0.45rem 0.6rem;
-    border-radius: 8px;
-    border: 1px solid var(--card-border);
-    background: transparent;
-    color: inherit;
-    font-size: 0.9em;
-  }
-
   .hint {
     font-size: 0.8em;
     color: var(--muted);
@@ -702,8 +754,8 @@
   }
 
   .rec-dot {
-    width: 9px;
-    height: 9px;
+    width: 0.5625rem;
+    height: 0.5625rem;
     border-radius: 50%;
     background: white;
     animation: pulse 1.4s ease-in-out infinite;

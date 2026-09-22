@@ -44,9 +44,13 @@
 </div>
 
 <style>
+  /* Grade fluida: cada card ocupa no mínimo 21rem (os 336px fixos de
+     antes) e cresce para preencher a faixa. O `min(21rem, 100%)` é o que
+     impede o transbordo quando a janela é mais estreita que 21rem — sem
+     ele, `minmax` mantém o mínimo e o card estoura o container. */
   .source-grid {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(21rem, 100%), 1fr));
     gap: 1.25rem;
   }
 
@@ -56,8 +60,9 @@
     align-items: center;
     justify-content: center;
     gap: 0.4rem;
-    width: 336px;
-    height: 260px;
+    /* Largura vem da faixa da grade; a altura vira mínimo para o card
+       acompanhar o conteúdo em vez de cortá-lo. */
+    min-height: 16.25rem;
     border: 1.5px dashed var(--accent);
     border-radius: 16px;
     opacity: 0.6;

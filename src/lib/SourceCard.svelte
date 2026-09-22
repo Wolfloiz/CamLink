@@ -142,7 +142,8 @@
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
-    width: 336px;
+    /* Sem largura fixa: o card preenche a faixa da grade do SourceGrid.
+       O .thumb já usa aspect-ratio 16/9, então a miniatura acompanha. */
     padding: 1rem;
     background: var(--card-bg);
     border: 1px solid var(--card-border);
@@ -185,8 +186,8 @@
   }
 
   .status-pill .dot {
-    width: 6px;
-    height: 6px;
+    width: 0.375rem;
+    height: 0.375rem;
     border-radius: 50%;
     background: #9ca3af;
   }

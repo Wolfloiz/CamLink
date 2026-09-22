@@ -4,7 +4,20 @@
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Tauri + SvelteKit + Typescript App</title>
+    <title>CamLink</title>
+    <script>
+      // Aplica o tema salvo antes do primeiro paint. Sem isto a página
+      // pinta no tema do SO e "pisca" para o escolhido quando o app monta.
+      // Chave espelhada de src/lib/theme.ts.
+      try {
+        var t = localStorage.getItem("camlink:theme");
+        if (t === "light" || t === "dark") {
+          document.documentElement.setAttribute("data-theme", t);
+        }
+      } catch (e) {
+        /* storage bloqueado: segue o SO, que era o comportamento antigo */
+      }
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
