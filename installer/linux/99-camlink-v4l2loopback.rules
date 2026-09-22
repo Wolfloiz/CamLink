@@ -1,0 +1,11 @@
+# CamLink (T066) — acesso ao device de controle do v4l2loopback.
+#
+# O CamLink cria/remove cada câmera virtual em runtime via
+# `v4l2loopback-ctl add|delete`, que abre /dev/v4l2loopback. Sem esta regra
+# o node nasce 0600 root:root e só root consegue criar device — o app
+# rodaria com privilégio ou pediria senha a cada fonte iniciada.
+#
+# Dar o node ao grupo `video` (o mesmo grupo que já governa /dev/video*)
+# mantém o app inteiro sem privilégio: nenhum caminho do CamLink usa sudo,
+# pkexec ou setuid.
+KERNEL=="v4l2loopback", GROUP="video", MODE="0660"

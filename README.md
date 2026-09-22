@@ -38,7 +38,7 @@ Firefox — WebRTC), Discord e qualquer aplicativo que use câmera.
 - **Android**: fork do [scrcpy](https://github.com/Genymobile/scrcpy)-server
   (Java 17, submodule em `scrcpy/`, branch `camlink`)
 - **Runtime**: adb, scrcpy ≥ 4.0, ffmpeg, v4l2loopback ≥ 0.13 (Linux),
-  akvirtualcamera (Windows)
+  filtro DirectShow próprio (Windows — sem driver de terceiros)
 
 ## Desenvolvimento
 
