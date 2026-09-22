@@ -7,6 +7,7 @@
   import RawPanel from "$lib/RawPanel.svelte";
   import RtspPanel from "$lib/RtspPanel.svelte";
   import SourceGrid from "$lib/SourceGrid.svelte";
+  import ThemeToggle from "$lib/ThemeToggle.svelte";
   import {
     listDeviceNicknames,
     onControlState,
@@ -306,6 +307,7 @@
       <span class="brand-dot"></span>
       <span class="brand-name">CamLink</span>
     </div>
+    <ThemeToggle />
     <span class="source-count">{sources.length}/{MAX_CONCURRENT_SOURCES} fontes ativas</span>
   </header>
 
@@ -500,7 +502,7 @@
        desenha TODO controle nativo — o <select> e o popup de <option> —
        em modo claro mesmo com a página escura, que era a causa dos
        dropdowns aparecerem como caixas claras no meio da UI escura. */
-    color-scheme: light dark;
+    color-scheme: light;
     --text: #14151a;
     color: var(--text);
     background-color: #f6f6f4;
@@ -511,8 +513,26 @@
     --muted: rgba(20, 21, 26, 0.6);
   }
 
+  /* Escuro em duas situações, e o bloco precisa ser repetido porque uma
+     delas vive dentro de uma media query. A alternativa enxuta seria
+     `light-dark()`, com um token só — mas ela é Baseline 2024 e o
+     WebKitGTK do Ubuntu 22.04 (alvo do quickstart e do T071) é antigo
+     demais; se não suportar, TODOS os tokens caem de uma vez. */
+
+  /* 1. usuário escolheu escuro explicitamente */
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --text: #f0f0f2;
+    background-color: #202127;
+    --card-bg: #2a2b33;
+    --card-border: rgba(255, 255, 255, 0.08);
+    --muted: rgba(240, 240, 242, 0.6);
+  }
+
+  /* 2. o SO pede escuro E o usuário não fixou claro */
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
       --text: #f0f0f2;
       background-color: #202127;
       --card-bg: #2a2b33;
@@ -562,6 +582,7 @@
   .topbar {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 1rem;
     padding: 1rem 1.5rem;
     border-bottom: 1px solid var(--card-border);
@@ -570,6 +591,9 @@
   .brand {
     display: flex;
     align-items: center;
+    /* empurra seletor de tema e contador para a direita; antes quem fazia
+       isso era o `margin-left: auto` do contador, que agora tem vizinho */
+    margin-right: auto;
     gap: 0.5rem;
     font-weight: 700;
     font-size: 1.1rem;
@@ -583,7 +607,6 @@
   }
 
   .source-count {
-    margin-left: auto;
     font-size: 0.8em;
     font-weight: 600;
     color: var(--muted);
