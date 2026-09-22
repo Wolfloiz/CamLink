@@ -11,8 +11,12 @@ cargo fmt --check && cargo clippy -- -D warnings && cargo test   # em src-tauri/
 ## Pré-requisitos
 
 - **Linux**: Ubuntu 22.04+/Arch; `adb`, `scrcpy ≥ 4.0`, `ffmpeg`,
-  `v4l2loopback-dkms (≥ 0.13)`, `v4l-utils` (o `installer/linux/install.sh`
-  instala tudo, incluindo policy polkit e udev rules).
+  `v4l2loopback-dkms (≥ 0.13)`, `v4l-utils` — `installer/linux/install.sh`
+  instala tudo (udev rule do `/dev/v4l2loopback`, modules-load.d e o usuário
+  no grupo `video`; sem polkit — nenhum caminho do app é privilegiado, ver
+  T066). `install.sh --check` diagnostica o que falta. O `scrcpy` da distro
+  costuma ser antigo demais no Debian/Ubuntu: use `--with-scrcpy` ou instale
+  o build oficial.
 - **Windows 10/11**: instalador NSIS/MSI do CamLink (inclui adb, scrcpy,
   ffmpeg e registra o filtro DirectShow próprio do CamLink — sem driver de
   terceiros).
