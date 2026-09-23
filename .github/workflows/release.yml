@@ -66,9 +66,16 @@ jobs:
 
       # build-camlink.sh roda os testes de protocolo contra os golden files
       # antes de empacotar; falha de teste aborta o build.
+      # Invocado por `bash ...` de propósito: `build-camlink.sh` está com
+      # modo 100644 no índice do submódulo (o repositório do fork tem
+      # core.fileMode=false, que mascara o bit faltando em quem já tem o
+      # arquivo em disco). Num checkout limpo — como o do runner — sai sem
+      # permissão de execução e `./build-camlink.sh` falha com exit 126.
+      # Corrigir o modo lá dentro é o conserto de verdade, mas é outro
+      # repositório; isto não depende dele.
       - name: Build do jar
         working-directory: scrcpy
-        run: ./build-camlink.sh dist
+        run: bash ./build-camlink.sh dist
 
       - uses: actions/upload-artifact@v4
         with:
