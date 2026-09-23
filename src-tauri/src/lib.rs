@@ -82,13 +82,17 @@ const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const CONTROL_CONNECT_RETRY_WINDOW: Duration = Duration::from_secs(8);
 const CONTROL_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(300);
 
-fn new_vcam_backend() -> Box<dyn VirtualCameraBackend + Send> {
+/// `ffmpeg` é o caminho já resolvido por `resolve_external_paths()`, que
+/// prefere o binário embutido pelo instalador ao do PATH. Só o backend
+/// Linux o usa — o filtro DirectShow do Windows não spawna ffmpeg.
+fn new_vcam_backend(ffmpeg: PathBuf) -> Box<dyn VirtualCameraBackend + Send> {
     #[cfg(target_os = "linux")]
     {
-        Box::new(V4l2Backend::new())
+        Box::new(V4l2Backend::new(ffmpeg))
     }
     #[cfg(target_os = "windows")]
     {
+        let _ = ffmpeg;
         Box::new(DShowBackend::new())
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -1966,12 +1970,16 @@ pub fn run() {
     // limpa, sem adb no PATH, nenhum celular era detectado apesar de o
     // binário estar instalado junto com o app (FR-024).
     let adb_path = external.adb.clone();
+    // Clonado antes de `external` ir para o StreamManager: o backend v4l2
+    // precisa do MESMO ffmpeg resolvido (embutido, quando houver), e não do
+    // que estiver no PATH.
+    let ffmpeg_path = external.ffmpeg.clone();
     runtime.spawn(cleanup_stale_forwards());
     let stream_manager = StreamManager::new(external);
     let rtsp_sessions: Arc<TokioMutex<HashMap<Uuid, RtspRuntime>>> =
         Arc::new(TokioMutex::new(HashMap::new()));
     let vcam: Arc<StdMutex<Box<dyn VirtualCameraBackend + Send>>> =
-        Arc::new(StdMutex::new(new_vcam_backend()));
+        Arc::new(StdMutex::new(new_vcam_backend(ffmpeg_path)));
     runtime.spawn(watch_for_shutdown_signal(
         stream_manager.clone(),
         Arc::clone(&rtsp_sessions),

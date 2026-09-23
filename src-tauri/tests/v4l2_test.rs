@@ -426,3 +426,36 @@ fn control_device_diagnostics_keep_their_hint() {
         "o diagnóstico precisa carregar a dica até o chamador"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Caminho do ffmpeg — o backend precisa usar o resolvido, não o do PATH
+//
+// O AppImage EMBUTE um ffmpeg e `resolve_external_paths()` sabe achá-lo, mas
+// o backend ignorava isso e spawnava `FFMPEG_BIN` do PATH: numa máquina sem
+// ffmpeg instalado a câmera falhava apesar de o binário estar dentro do
+// pacote. Mesma classe do bug do `adb` do T066.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn backend_uses_the_resolved_ffmpeg_not_the_one_from_path() {
+    use camlink_lib::virtualcam::v4l2::V4l2Backend;
+    let embutido = std::path::PathBuf::from("/usr/lib/CamLink/bin/ffmpeg");
+    let backend = V4l2Backend::new(embutido.clone());
+    assert_eq!(
+        backend.ffmpeg_path(),
+        embutido,
+        "o backend precisa honrar o caminho recebido; voltar a `FFMPEG_BIN` \
+         faria o ffmpeg embutido no AppImage ser ignorado"
+    );
+}
+
+#[test]
+fn default_backend_falls_back_to_path() {
+    use camlink_lib::virtualcam::v4l2::V4l2Backend;
+    // `Default` só existe para contextos sem resolução de caminhos; aí o
+    // PATH é o comportamento correto, não um descuido.
+    assert_eq!(
+        V4l2Backend::default().ffmpeg_path(),
+        std::path::Path::new("ffmpeg")
+    );
+}
