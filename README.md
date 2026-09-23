@@ -224,6 +224,13 @@ Algumas versões do Firefox no Linux não enumeram dispositivos
 `v4l2loopback`. O CamLink oferece abrir o Firefox com uma camada de
 compatibilidade que resolve isso.
 
+### A transmissão falha repetidamente num aparelho Samsung
+
+Desconecte e reconecte o cabo USB, ou reinicie o aplicativo. É um problema
+conhecido do scrcpy com a camada de câmera da Samsung, não do CamLink — os
+detalhes e os relatos no upstream estão em
+[Limitações conhecidas](#limitações-conhecidas).
+
 ### A câmera some do OBS ao girar ou trocar de câmera (Linux)
 
 Comportamento conhecido, com explicação e contorno em
@@ -286,23 +293,24 @@ no instalador; o projeto não os modifica.
   chamada) resolve.** Reproduzido também num Moto G55 (2026-08-03), então
   não é peculiaridade do S20 FE — parece ser inerente ao caminho de restart
   do scrcpy no Linux (`--v4l2-sink`), independente de fabricante.
-- **Em alguns aparelhos Samsung, reconectar após um restart pode entrar num
-  ciclo de falhas/artefatos que não se autorrecupera** (visto em bancada com
-  um SM-G781B — o app tenta de novo com backoff, mas o dispositivo às vezes
-  não libera a câmera a tempo, ciclando entre "Address already in use",
-  "Demuxer error" e `CAMERA_DISCONNECTED`). Depois de várias tentativas
-  seguidas sem sucesso, o app desiste e mostra um erro pedindo pra
-  desconectar/reconectar o cabo USB ou reiniciar o app, em vez de martelar o
-  device indefinidamente (circuit breaker). **Causa raiz**: parece ser um bug
-  conhecido e ainda aberto do próprio scrcpy com o Camera2 HAL de aparelhos
-  Samsung (não é específico do CamLink) — mesmo padrão relatado em S22,
-  SM-S906B e outros: [#6514](https://github.com/Genymobile/scrcpy/issues/6514),
+- **Em alguns aparelhos Samsung, a transmissão pode falhar repetidamente
+  depois de trocar de câmera ou girar a imagem.** O aparelho não libera a
+  câmera a tempo e o CamLink não consegue reabri-la; depois de algumas
+  tentativas ele desiste e pede para reconectar o cabo, em vez de ficar
+  tentando indefinidamente. **Contorno**: desconecte e reconecte o cabo USB,
+  ou reinicie o aplicativo.
+
+  Não é um defeito do CamLink. É um problema conhecido e ainda em aberto do
+  próprio scrcpy com a camada de câmera dos aparelhos Samsung, relatado em
+  S22, SM-S906B e outros modelos:
+  [#6514](https://github.com/Genymobile/scrcpy/issues/6514),
   [#5977](https://github.com/Genymobile/scrcpy/issues/5977),
-  [#5311](https://github.com/Genymobile/scrcpy/issues/5311). Tentativas de
-  isolar o gatilho (resolução, sequência de restart de rotação, leitor de
-  preview concorrente) não reproduziram em testes isolados — o disparo real
-  parece exigir o padrão de uso completo do app. **Ainda sem decisão de
-  como tratar definitivamente; será decidido antes da versão release.**
+  [#5311](https://github.com/Genymobile/scrcpy/issues/5311). Tentamos isolar
+  o gatilho (resolução, sequência de giros, leitor de preview concorrente)
+  sem conseguir reproduzir em testes controlados — o disparo parece exigir o
+  padrão de uso completo do aplicativo. Enquanto não houver correção no
+  upstream, não há o que o CamLink possa fazer além de falhar de forma
+  previsível e avisar, que é o comportamento atual.
 
 ## Contribuindo
 
