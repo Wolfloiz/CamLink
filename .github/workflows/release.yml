@@ -157,7 +157,14 @@ jobs:
         run: ./installer/windows/vendor.ps1
 
       - run: pnpm install --frozen-lockfile
-      - run: pnpm tauri build --bundles nsis,msi
+
+      # `--bundles 'nsis,msi'` com aspas: os steps do Windows rodam em
+      # PowerShell, que interpreta `nsis,msi` SEM aspas como array e o
+      # repassa ao comando nativo juntando com espaço — o tauri recebia
+      # "nsis msi" numa única string e recusava com
+      # `invalid value 'nsis msi'`. O job Linux não tem esse problema
+      # porque bash não faz essa conversão.
+      - run: pnpm tauri build --bundles 'nsis,msi'
 
       - uses: actions/upload-artifact@v4
         with:
