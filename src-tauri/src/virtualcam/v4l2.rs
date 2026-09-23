@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
 use uuid::Uuid;
@@ -256,30 +257,50 @@ impl Drop for ManagedCamera {
 /// dedicado por câmera.
 pub struct V4l2Backend {
     cameras: HashMap<Uuid, ManagedCamera>,
+    /// Caminho do `ffmpeg` a usar, resolvido pelo chamador.
+    ///
+    /// Antes isto era a constante `FFMPEG_BIN`, ou seja, sempre o binário do
+    /// PATH. Mas o AppImage EMBUTE um ffmpeg (`bundle.linux.appimage.files`,
+    /// T066) e `resolve_external_paths()` sabe encontrá-lo — o backend é que
+    /// ignorava a resolução e ia direto no PATH. Numa máquina sem ffmpeg
+    /// instalado, a câmera virtual falhava apesar de o binário estar dentro
+    /// do próprio pacote. Mesma classe do bug do `adb` corrigido no T066.
+    ffmpeg: PathBuf,
 }
 
 impl Default for V4l2Backend {
+    /// Cai no `ffmpeg` do PATH. Só faz sentido onde não há resolução de
+    /// caminhos disponível (testes); o app usa `new` com o caminho
+    /// resolvido.
     fn default() -> Self {
-        Self::new()
+        Self::new(PathBuf::from(FFMPEG_BIN))
     }
 }
 
 impl V4l2Backend {
-    pub fn new() -> Self {
+    /// Caminho do ffmpeg que este backend usa. Existe para o teste que
+    /// impede a volta da constante `FFMPEG_BIN` codificada no spawn.
+    pub fn ffmpeg_path(&self) -> &std::path::Path {
+        &self.ffmpeg
+    }
+
+    pub fn new(ffmpeg: PathBuf) -> Self {
         let mut backend = Self {
             cameras: HashMap::new(),
+            ffmpeg,
         };
         backend.cleanup_stale();
         backend
     }
 
     fn spawn_ffmpeg(
+        &self,
         device_path: &str,
         resolution: (u32, u32),
         fps: u32,
     ) -> Result<Child, VcamError> {
         let (w, h) = resolution;
-        Command::new(FFMPEG_BIN)
+        Command::new(&self.ffmpeg)
             .args([
                 "-loglevel",
                 "error",
@@ -371,7 +392,7 @@ impl V4l2Backend {
         resolution: (u32, u32),
         fps: u32,
     ) -> Result<VirtualCamera, VcamError> {
-        let ffmpeg = Self::spawn_ffmpeg(&device_path, resolution, fps)?;
+        let ffmpeg = self.spawn_ffmpeg(&device_path, resolution, fps)?;
         let camera = VirtualCamera {
             id: Uuid::new_v4(),
             label: label.to_string(),
