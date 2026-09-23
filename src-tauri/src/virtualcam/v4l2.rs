@@ -203,6 +203,37 @@ pub fn detect_control_device_block(stderr: &str) -> Option<AppError> {
     None
 }
 
+/// Traduz a falha de EXECUÇÃO do `v4l2loopback-ctl` — distinta das falhas
+/// que ele reporta rodando, tratadas por `detect_secure_boot_block` e
+/// `detect_control_device_block`.
+///
+/// Quando o binário não está instalado, o `Command` falha antes de produzir
+/// qualquer stderr, então aqueles detectores nunca rodam. Era o caminho com
+/// a PIOR mensagem justamente por ser o PRIMEIRO que um usuário sem os
+/// pré-requisitos encontra: o erro cru do sistema operacional
+/// ("No such file or directory (os error 2)") vazava direto para a tela.
+///
+/// O utilitário não é embutido no AppImage de propósito: ele conversa com o
+/// módulo do kernel, e embarcar uma versão descasada seria pior do que não
+/// ter. Vem do pacote da distribuição, que é o que o `install.sh` instala.
+pub fn ctl_spawn_error(e: std::io::Error) -> VcamError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        return VcamError::Actionable(
+            AppError::new(
+                "v4l2loopback_ctl_ausente",
+                "O utilitário v4l2loopback-ctl não está instalado",
+            )
+            .with_hint(
+                "Instale os pré-requisitos do sistema uma vez: \
+                 `sudo ./installer/linux/install.sh` (ou o pacote `v4l-utils` da sua \
+                 distribuição). O AppImage não embute esse utilitário porque ele \
+                 precisa casar com o módulo v4l2loopback do kernel.",
+            ),
+        );
+    }
+    VcamError::Backend(format!("falha ao executar v4l2loopback-ctl: {e}"))
+}
+
 // ---------------------------------------------------------------------------
 // V4l2Backend
 // ---------------------------------------------------------------------------
@@ -314,13 +345,16 @@ impl V4l2Backend {
         let output = Command::new(CTL_BIN)
             .args(build_add_args(label))
             .output()
-            .map_err(|e| VcamError::Backend(format!("falha ao executar v4l2loopback-ctl: {e}")))?;
+            .map_err(ctl_spawn_error)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if let Some(err) =
                 detect_secure_boot_block(&stderr).or_else(|| detect_control_device_block(&stderr))
             {
-                return Err(VcamError::Backend(err.msg));
+                // `Actionable` e não `Backend(err.msg)`: o segundo descartava
+                // o `action_hint` que estes diagnósticos existem para
+                // produzir.
+                return Err(VcamError::Actionable(err));
             }
             return Err(VcamError::Backend(format!(
                 "v4l2loopback-ctl add falhou: {stderr}"

@@ -524,7 +524,7 @@ async fn start_stream(
     let virtual_camera = {
         let mut vcam = state.vcam.lock().unwrap();
         vcam.create(&label, config.resolution, config.fps)
-            .map_err(|e| AppError::new("vcam_create_failed", e.to_string()))?
+            .map_err(vcam_error)?
     };
     let vcam_id = virtual_camera.id;
     let orientation = Arc::new(StdMutex::new((Rotation::Deg0, false)));
@@ -756,6 +756,21 @@ async fn ensure_control(
 
     ctx.control = Some(client);
     Ok(())
+}
+
+/// Converte uma falha do backend de câmera virtual em `AppError`.
+///
+/// O ponto todo é o braço `Actionable`: os diagnósticos do backend (grupo
+/// `video` faltando, módulo não carregado, Secure Boot, utilitário ausente)
+/// já produzem `code` e `action_hint` próprios, e antes disto eles eram
+/// achatados por `e.to_string()` num `vcam_create_failed` genérico sem
+/// dica. O frontend sabe exibir `action_hint` desde sempre — o texto é que
+/// nunca chegava lá.
+fn vcam_error(e: crate::virtualcam::VcamError) -> AppError {
+    match e {
+        crate::virtualcam::VcamError::Actionable(err) => err,
+        other => AppError::new("vcam_create_failed", other.to_string()),
+    }
 }
 
 /// Converte a resposta do fork em `Result`, preservando o código do
@@ -1161,7 +1176,7 @@ async fn restart_android_session(
                 } else {
                     vcam.create(&label, output_dims, config.fps)
                 }
-                .map_err(|e| AppError::new("vcam_create_failed", e.to_string()))?
+                .map_err(vcam_error)?
             }
         }
     };
@@ -1612,7 +1627,7 @@ async fn start_rtsp(
     let virtual_camera = {
         let mut vcam = state.vcam.lock().unwrap();
         vcam.create(&label, RTSP_RESOLUTION, RTSP_FPS)
-            .map_err(|e| AppError::new("vcam_create_failed", e.to_string()))?
+            .map_err(vcam_error)?
     };
     let vcam_id = virtual_camera.id;
     let session_id = Uuid::new_v4();

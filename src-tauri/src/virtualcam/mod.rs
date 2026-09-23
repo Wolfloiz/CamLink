@@ -154,6 +154,16 @@ pub enum VcamError {
     InvalidFrame(String),
     #[error("falha do backend de câmera virtual: {0}")]
     Backend(String),
+    /// Falha já diagnosticada, com código estável e dica pronta para o
+    /// usuário.
+    ///
+    /// Existe porque `Backend(String)` achata tudo em texto: os
+    /// diagnósticos do T066 (`detect_secure_boot_block`,
+    /// `detect_control_device_block`) construíam um `AppError` completo e
+    /// só o `msg` sobrevivia — o `action_hint` era descartado aqui e nunca
+    /// chegava à tela, apesar de o frontend saber exibi-lo.
+    #[error("{0}")]
+    Actionable(AppError),
 }
 
 /// Backend de câmera virtual por plataforma (Linux: v4l2loopback; Windows:
