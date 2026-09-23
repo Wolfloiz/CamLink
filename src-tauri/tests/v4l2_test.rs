@@ -21,7 +21,7 @@
 #![cfg(target_os = "linux")]
 
 use camlink_lib::virtualcam::v4l2::{
-    build_add_args, ctl_supports_dynamic_add, detect_control_device_block,
+    build_add_args, ctl_spawn_error, ctl_supports_dynamic_add, detect_control_device_block,
     detect_secure_boot_block, find_reusable_device, orphan_devices, parse_added_device,
     parse_ctl_version, parse_list_output, LoopbackDevice,
 };
@@ -370,4 +370,59 @@ fn secure_boot_stderr_is_not_a_control_device_block() {
 #[test]
 fn empty_stderr_is_not_a_control_device_block() {
     assert!(detect_control_device_block("").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// ctl_spawn_error — falha de EXECUÇÃO do v4l2loopback-ctl
+//
+// Distinta das falhas que ele reporta rodando: quando o binário não está
+// instalado, o Command falha antes de produzir stderr, então
+// detect_secure_boot_block/detect_control_device_block nunca rodam. Era o
+// caminho de pior mensagem e o primeiro que um usuário sem pré-requisitos
+// encontra (relatado em bancada com o AppImage, 2026-09-23).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn missing_ctl_binary_is_actionable_not_a_raw_os_error() {
+    let err = ctl_spawn_error(std::io::Error::from(std::io::ErrorKind::NotFound));
+    let camlink_lib::virtualcam::VcamError::Actionable(app) = err else {
+        panic!("binário ausente precisa virar erro acionável, não Backend(String)");
+    };
+    assert_eq!(app.code, "v4l2loopback_ctl_ausente");
+    let hint = app.action_hint.expect("precisa dizer o próximo passo");
+    assert!(
+        hint.contains("install.sh") || hint.contains("v4l-utils"),
+        "a dica precisa apontar como instalar: {hint}"
+    );
+    // O que o usuário via antes desta correção.
+    assert!(
+        !app.msg.contains("os error"),
+        "erro cru do SO não pode vazar para a tela: {}",
+        app.msg
+    );
+}
+
+#[test]
+fn other_spawn_failures_stay_generic() {
+    // Só o binário ausente tem diagnóstico próprio; qualquer outra falha de
+    // execução continua no caminho genérico, sem inventar orientação errada.
+    let err = ctl_spawn_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    assert!(
+        matches!(err, camlink_lib::virtualcam::VcamError::Backend(_)),
+        "falha de execução que não é NotFound não deve virar Actionable"
+    );
+}
+
+#[test]
+fn control_device_diagnostics_keep_their_hint() {
+    // Regressão do bug irmão: `VcamError::Backend(err.msg)` descartava o
+    // action_hint, então as dicas do T066 eram construídas e jogadas fora.
+    let err = detect_control_device_block(
+        "unable to open control device '/dev/v4l2loopback': Permission denied\n",
+    )
+    .expect("deve detectar EACCES");
+    assert!(
+        err.action_hint.is_some(),
+        "o diagnóstico precisa carregar a dica até o chamador"
+    );
 }

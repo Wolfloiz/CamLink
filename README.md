@@ -60,20 +60,31 @@ empacota é antigo demais (o CamLink precisa de ≥ 4.0) — veja
 yay -S camlink
 ```
 
-**AppImage** — traz o app e suas dependências, mas **não** configura o
-`v4l2loopback` do sistema, que é o que cria a webcam virtual. Essa parte
-precisa ser feita uma vez, com o script de pré-requisitos:
+**AppImage** — atenção, este é o único formato que **não se configura
+sozinho**.
+
+> ⚠️ **O AppImage exige um passo extra antes do primeiro uso.** Ele traz o
+> aplicativo, mas a webcam virtual depende do `v4l2loopback` — um módulo do
+> kernel e um utilitário de linha de comando que precisam vir da sua
+> distribuição. Um AppImage não tem como instalar isso.
+>
+> **Se você pular este passo, o app abre normalmente e só falha na hora de
+> iniciar a transmissão**, dizendo que o `v4l2loopback-ctl` não está
+> instalado.
 
 ```bash
 chmod +x CamLink_0.1.0_amd64.AppImage
 
+# Passo obrigatório, uma única vez:
 git clone --depth 1 https://github.com/Wolfloiz/CamLink.git
 sudo ./CamLink/installer/linux/install.sh
 ```
 
 O clone é necessário porque o script instala arquivos de configuração que
-ficam ao lado dele. Se você prefere não clonar nada, use o `.deb` ou o
-pacote do AUR, que fazem isso sozinhos.
+ficam ao lado dele.
+
+**Se você prefere não fazer isso, use o `.deb` ou o pacote do AUR** — eles
+declaram as dependências e configuram tudo na instalação, sem passo manual.
 
 Depois de qualquer instalação, **faça logout e login** — seu usuário foi
 adicionado ao grupo `video` e isso só vale na próxima sessão.
@@ -172,6 +183,22 @@ Nesta ordem: confirme que o cabo é de **dados** e não só de carga; que a
 **Depuração USB** está ligada; e, no Linux, que o `adb` está instalado
 (`install.sh --check` diz). Trocar a porta USB também resolve casos de hub com
 pouca energia.
+
+### "O utilitário v4l2loopback-ctl não está instalado"
+
+Os pré-requisitos do sistema não foram instalados. Acontece tipicamente com o
+**AppImage**, que não consegue instalá-los sozinho — veja a
+[nota na seção de instalação](#linux).
+
+```bash
+sudo ./installer/linux/install.sh
+```
+
+Ou instale pela sua distribuição: o utilitário vem no pacote `v4l-utils`
+(Debian/Ubuntu e Arch) e o módulo, no `v4l2loopback-dkms`.
+
+Ele não é embutido no AppImage de propósito: precisa casar com o módulo do
+kernel em uso, e uma versão descasada seria pior do que nenhuma.
 
 ### "Sem permissão para criar a câmera virtual"
 
