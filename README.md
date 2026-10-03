@@ -67,31 +67,33 @@ publicada, porque ele baixa os fontes a partir da tag.
 
 Por enquanto, no Arch, use o AppImage ou compile do código-fonte.
 
-**AppImage** — atenção, este é o único formato que **não se configura
-sozinho**.
+**AppImage** — baixe o `.AppImage` e o `install-appimage.sh` da mesma
+release, e rode:
 
-> ⚠️ **O AppImage exige um passo extra antes do primeiro uso.** Ele traz o
-> aplicativo, mas a webcam virtual depende do `v4l2loopback` — um módulo do
-> kernel e um utilitário de linha de comando que precisam vir da sua
-> distribuição. Um AppImage não tem como instalar isso.
->
-> **Se você pular este passo, o app abre normalmente e só falha na hora de
-> iniciar a transmissão**, dizendo que o `v4l2loopback-ctl` não está
-> instalado.
+```bash
+bash install-appimage.sh
+```
+
+Ele encontra o AppImage na pasta de downloads, instala em `~/.local/bin`,
+cria a entrada no menu de aplicativos com o ícone, e — só se faltar algo —
+pede sudo uma única vez para instalar o `v4l2loopback`. Para remover:
+`bash install-appimage.sh --uninstall`.
+
+> **Por que um script, se AppImage não precisa de instalação?** Porque sem
+> ele o arquivo fica inerte: o bit de execução não sobrevive ao download, e
+> gerenciadores de arquivos modernos não executam binários por duplo clique
+> (o Nautilus removeu isso por segurança). O sistema então diz *"não há
+> aplicativo instalado para AppImage"* — mensagem que sugere procurar um
+> programa, quando o problema é outro. O script também resolve o
+> `v4l2loopback`, que um AppImage não tem como instalar sozinho.
+
+Se preferir não usar o script, dá para rodar direto pelo terminal, mas o app
+não aparecerá no menu:
 
 ```bash
 chmod +x CamLink_0.1.0_amd64.AppImage
-
-# Passo obrigatório, uma única vez:
-git clone --depth 1 https://github.com/Wolfloiz/CamLink.git
-sudo ./CamLink/installer/linux/install.sh
+./CamLink_0.1.0_amd64.AppImage
 ```
-
-O clone é necessário porque o script instala arquivos de configuração que
-ficam ao lado dele.
-
-**Se você prefere não fazer isso, use o `.deb` ou o pacote do AUR** — eles
-declaram as dependências e configuram tudo na instalação, sem passo manual.
 
 Depois de qualquer instalação, **faça logout e login** — seu usuário foi
 adicionado ao grupo `video` e isso só vale na próxima sessão.

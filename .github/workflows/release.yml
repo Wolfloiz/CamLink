@@ -126,6 +126,7 @@ jobs:
           path: |
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/appimage/*.AppImage
+            installer/linux/install-appimage.sh
 
   windows:
     name: instaladores Windows (NSIS + MSI)
