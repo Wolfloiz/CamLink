@@ -194,8 +194,9 @@ Os pré-requisitos do sistema não foram instalados. Acontece tipicamente com o
 sudo ./installer/linux/install.sh
 ```
 
-Ou instale pela sua distribuição: o utilitário vem no pacote `v4l-utils`
-(Debian/Ubuntu e Arch) e o módulo, no `v4l2loopback-dkms`.
+Ou instale pela sua distribuição: o utilitário vem no pacote
+`v4l2loopback-utils` e o módulo, no `v4l2loopback-dkms`. Note que **não** é o
+`v4l-utils` — esse é outro projeto, que traz o `v4l2-ctl` e afins.
 
 Ele não é embutido no AppImage de propósito: precisa casar com o módulo do
 kernel em uso, e uma versão descasada seria pior do que nenhuma.
