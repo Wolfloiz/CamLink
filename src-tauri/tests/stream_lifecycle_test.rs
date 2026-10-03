@@ -265,3 +265,61 @@ fn classify_stderr_ignores_unknown_lines() {
     assert!(classify_stderr("INFO: Texture: 1920x1080").is_none());
     assert!(classify_stderr("").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// SCRCPY_SERVER_PATH precisa CHEGAR ao cliente scrcpy (Linux)
+//
+// `resolve_external_paths()` resolve o jar do fork, mas até esta correção o
+// caminho morria ali: era só lido para preencher `server_jar`, nunca
+// repassado ao processo filho. O scrcpy então enviava o server DELE ao
+// celular em vez do nosso fork, e sem o fork não existe o socket
+// `localabstract:camlink` — todo controle de câmera falhava com "conexão de
+// controle encerrada pelo servidor".
+//
+// Passou despercebido porque em desenvolvimento a variável costuma estar
+// exportada no shell e o filho a herda. Num pacote instalado não há shell.
+// Relatado em bancada com o AppImage (2026-10-03).
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn scrcpy_client_receives_the_fork_jar_path() {
+    let dump = tempfile::NamedTempFile::new().expect("temp");
+    let dump_path = dump.path().to_path_buf();
+
+    let jar = PathBuf::from("/usr/lib/CamLink/bin/scrcpy-server-camlink");
+    let mut paths = base_paths(vec![(
+        "FAKE_BACKEND_ENV_DUMP".into(),
+        dump_path.display().to_string(),
+    )]);
+    paths.server_jar = jar.clone();
+
+    let manager = StreamManager::new(paths);
+    let session_id = manager
+        .start(
+            SessionSource::Android("R58M12ABCDE".into()),
+            sample_config(),
+            "/dev/video0",
+            None,
+        )
+        .await
+        .expect("start");
+
+    // O fake escreve assim que sobe; espera curta para o arquivo existir.
+    for _ in 0..50 {
+        if std::fs::read_to_string(&dump_path).is_ok_and(|s| !s.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    let got = std::fs::read_to_string(&dump_path).unwrap_or_default();
+    let _ = manager.stop(session_id).await;
+
+    assert_eq!(
+        got,
+        jar.display().to_string(),
+        "o cliente scrcpy precisa receber SCRCPY_SERVER_PATH apontando para o jar \
+         do fork; sem isso ele envia o próprio server e os controles de câmera \
+         quebram com `conexão de controle encerrada pelo servidor`"
+    );
+}

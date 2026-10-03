@@ -40,6 +40,16 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Registra o ambiente recebido ANTES de despachar o modo: o que
+    // interessa é o que o pai repassou, não o que o fake faz depois.
+    // Usado pelo teste que garante o SCRCPY_SERVER_PATH chegando ao cliente
+    // scrcpy — sem ele o scrcpy envia o server dele ao celular, não o nosso
+    // fork, e todo controle de câmera falha.
+    if let Ok(path) = env::var("FAKE_BACKEND_ENV_DUMP") {
+        let got = env::var("SCRCPY_SERVER_PATH").unwrap_or_default();
+        let _ = std::fs::write(path, got);
+    }
+
     let mode = env::var("FAKE_BACKEND_MODE").unwrap_or_else(|_| "stay_alive".to_string());
     match mode.as_str() {
         "crash_once" => {
