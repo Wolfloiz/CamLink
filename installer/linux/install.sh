@@ -172,7 +172,9 @@ install_system_files() {
   install -Dm644 "$MODULES_LOAD_SRC" "$MODULES_LOAD_DST"
   install -Dm644 "$MODPROBE_SRC"     "$MODPROBE_DST"
   udevadm control --reload-rules 2>/dev/null || true
-  udevadm trigger --subsystem-match=video4linux 2>/dev/null || true
+  # /dev/v4l2loopback é subsystem=misc, NÃO video4linux — disparar só
+  # video4linux nunca reaplicava a regra ao device de controle.
+  udevadm trigger --subsystem-match=misc --subsystem-match=video4linux 2>/dev/null || true
   green "  $UDEV_RULE_DST"
   green "  $MODULES_LOAD_DST"
   green "  $MODPROBE_DST"
