@@ -477,8 +477,26 @@ async fn spawn_backend(
             orientation.1,
             serial,
         );
+        // `SCRCPY_SERVER_PATH` diz ao cliente scrcpy QUAL jar enviar ao
+        // celular. Sem isto ele envia o server dele (/usr/share/scrcpy/
+        // scrcpy-server), não o nosso fork — e sem o fork no aparelho não
+        // existe o socket `localabstract:camlink`, então todo controle de
+        // câmera falha com "conexão de controle encerrada pelo servidor".
+        //
+        // `resolve_external_paths()` já resolvia o jar corretamente, mas o
+        // caminho morria ali: era só LIDO para preencher `server_jar`, nunca
+        // repassado ao processo filho. Isso passou despercebido porque em
+        // desenvolvimento a variável costuma estar exportada no shell (o
+        // `build-camlink.sh` imprime `use: SCRCPY_SERVER_PATH=...`), e o
+        // filho a HERDA do ambiente. Num pacote instalado não há shell
+        // nenhum, e o bug aparece — relatado em bancada com o AppImage
+        // (2026-10-03).
+        //
+        // Vai antes de `extra_env` de propósito: os testes sobrescrevem a
+        // variável por ali quando precisam.
         let mut child = Command::new(&paths.scrcpy)
             .args(&args)
+            .env("SCRCPY_SERVER_PATH", &paths.server_jar)
             .envs(paths.extra_env.iter().cloned())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
