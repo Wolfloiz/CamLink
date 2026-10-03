@@ -94,8 +94,8 @@ detect_pm() {
 # real — ver `ensure_scrcpy`.
 pm_packages() {
   case "$1" in
-    apt-get) echo "adb ffmpeg v4l-utils v4l2loopback-dkms" ;;
-    pacman)  echo "android-tools ffmpeg v4l-utils v4l2loopback-dkms scrcpy" ;;
+    apt-get) echo "adb ffmpeg v4l-utils v4l2loopback-utils v4l2loopback-dkms" ;;
+    pacman)  echo "android-tools ffmpeg v4l-utils v4l2loopback-utils v4l2loopback-dkms scrcpy" ;;
     dnf)     echo "android-tools ffmpeg v4l-utils v4l2loopback" ;;
     zypper)  echo "android-tools ffmpeg v4l-utils v4l2loopback-kmp-default" ;;
   esac
@@ -103,6 +103,10 @@ pm_packages() {
 
 install_packages() {
   local pm; pm="$(detect_pm)"
+  # `v4l2loopback-ctl` vem de `v4l2loopback-utils`, NÃO de `v4l-utils` —
+  # este último é o projeto v4l-utils do linuxtv (v4l2-ctl, cec-*). Instalar
+  # só ele fazia o install.sh dizer "Pronto" e o app falhar depois, porque o
+  # utilitário que cria a câmera virtual não estava lá.
   local pkgs; pkgs="$(pm_packages "$pm")"
   if [[ -z "$pm" ]]; then
     yellow "Gerenciador de pacotes não reconhecido — instale manualmente:"

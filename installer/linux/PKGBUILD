@@ -20,7 +20,7 @@ license=('GPL-3.0-or-later')
 # empacota uma versão atual — diferente do Debian/Ubuntu, onde a versão da
 # distro é antiga demais e o install.sh cuida disso.
 depends=('webkit2gtk-4.1' 'gtk3' 'ffmpeg' 'android-tools' 'scrcpy>=4.0'
-         'v4l2loopback-dkms>=0.13' 'v4l-utils')
+         'v4l2loopback-dkms>=0.13' 'v4l2loopback-utils' 'v4l-utils')
 # `cargo` é virtual (provido por `rust` OU `rustup`) — listar `rust`
 # explícito impediria quem usa rustup de buildar, porque rustup declara
 # Conflicts com rust/cargo.
