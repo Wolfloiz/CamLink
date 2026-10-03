@@ -94,8 +94,8 @@ detect_pm() {
 # real — ver `ensure_scrcpy`.
 pm_packages() {
   case "$1" in
-    apt-get) echo "adb ffmpeg v4l-utils v4l2loopback-dkms" ;;
-    pacman)  echo "android-tools ffmpeg v4l-utils v4l2loopback-dkms scrcpy" ;;
+    apt-get) echo "adb ffmpeg v4l-utils v4l2loopback-utils v4l2loopback-dkms" ;;
+    pacman)  echo "android-tools ffmpeg v4l-utils v4l2loopback-utils v4l2loopback-dkms scrcpy" ;;
     dnf)     echo "android-tools ffmpeg v4l-utils v4l2loopback" ;;
     zypper)  echo "android-tools ffmpeg v4l-utils v4l2loopback-kmp-default" ;;
   esac
@@ -103,6 +103,10 @@ pm_packages() {
 
 install_packages() {
   local pm; pm="$(detect_pm)"
+  # `v4l2loopback-ctl` vem de `v4l2loopback-utils`, NÃO de `v4l-utils` —
+  # este último é o projeto v4l-utils do linuxtv (v4l2-ctl, cec-*). Instalar
+  # só ele fazia o install.sh dizer "Pronto" e o app falhar depois, porque o
+  # utilitário que cria a câmera virtual não estava lá.
   local pkgs; pkgs="$(pm_packages "$pm")"
   if [[ -z "$pm" ]]; then
     yellow "Gerenciador de pacotes não reconhecido — instale manualmente:"
@@ -168,7 +172,9 @@ install_system_files() {
   install -Dm644 "$MODULES_LOAD_SRC" "$MODULES_LOAD_DST"
   install -Dm644 "$MODPROBE_SRC"     "$MODPROBE_DST"
   udevadm control --reload-rules 2>/dev/null || true
-  udevadm trigger --subsystem-match=video4linux 2>/dev/null || true
+  # /dev/v4l2loopback é subsystem=misc, NÃO video4linux — disparar só
+  # video4linux nunca reaplicava a regra ao device de controle.
+  udevadm trigger --subsystem-match=misc --subsystem-match=video4linux 2>/dev/null || true
   green "  $UDEV_RULE_DST"
   green "  $MODULES_LOAD_DST"
   green "  $MODPROBE_DST"
@@ -198,7 +204,10 @@ add_to_video_group() {
     yellow "Não consegui identificar o usuário — adicione manualmente: sudo usermod -aG video \$USER"
     return
   fi
-  if id -nG "$user" | tr ' ' '\n' | grep -qx video; then
+  # Mesma armadilha do pipefail descrita acima: este `| grep -qx` reportava
+  # que o usuário NÃO estava no grupo mesmo quando estava, e o script
+  # imprimia "adicionado" a cada execução.
+  if [[ " $(id -nG "$user") " == *" video "* ]]; then
     green "Usuário '$user' já está no grupo video"
     return
   fi
@@ -252,7 +261,13 @@ check() {
   [[ -f "$MODULES_LOAD_DST" ]] && green "  modules-load.d: $MODULES_LOAD_DST" \
     || { red "  modules-load.d: ausente"; failures=$((failures + 1)); }
 
-  if lsmod | grep -q '^v4l2loopback'; then
+  # Lê /proc/modules em vez de `lsmod | grep -q`: com `set -o pipefail` (no
+  # topo deste script) aquele pipe SEMPRE reportava "não carregado". O
+  # `grep -q` sai no primeiro match e manda SIGPIPE pro `lsmod`, que termina
+  # com 141; o pipefail propaga o 141 e o `if` cai no else. Ou seja, a
+  # checagem nunca conseguia dizer "carregado" — só acertava por acidente
+  # quando o módulo realmente não estava.
+  if grep -q '^v4l2loopback ' /proc/modules; then
     green "  módulo: carregado"
   else
     red "  módulo: não carregado (sudo modprobe v4l2loopback)"; failures=$((failures + 1))

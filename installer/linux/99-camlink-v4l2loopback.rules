@@ -8,4 +8,11 @@
 # Dar o node ao grupo `video` (o mesmo grupo que já governa /dev/video*)
 # mantém o app inteiro sem privilégio: nenhum caminho do CamLink usa sudo,
 # pkexec ou setuid.
-KERNEL=="v4l2loopback", GROUP="video", MODE="0660"
+# `TAG+="uaccess"` é o que faz funcionar "chegar e usar": o systemd-logind
+# concede uma ACL ao usuário da sessão ATIVA assim que o device aparece, sem
+# depender de grupo e sem exigir logout/login. É o mesmo mecanismo que dá
+# acesso a /dev/snd e /dev/dri.
+#
+# `GROUP="video"` fica como rede de segurança para onde não há logind com
+# seat (servidor, container, sessão remota), onde o uaccess não se aplica.
+KERNEL=="v4l2loopback", GROUP="video", MODE="0660", TAG+="uaccess"
