@@ -202,7 +202,10 @@ add_to_video_group() {
     yellow "Não consegui identificar o usuário — adicione manualmente: sudo usermod -aG video \$USER"
     return
   fi
-  if id -nG "$user" | tr ' ' '\n' | grep -qx video; then
+  # Mesma armadilha do pipefail descrita acima: este `| grep -qx` reportava
+  # que o usuário NÃO estava no grupo mesmo quando estava, e o script
+  # imprimia "adicionado" a cada execução.
+  if [[ " $(id -nG "$user") " == *" video "* ]]; then
     green "Usuário '$user' já está no grupo video"
     return
   fi
@@ -256,7 +259,13 @@ check() {
   [[ -f "$MODULES_LOAD_DST" ]] && green "  modules-load.d: $MODULES_LOAD_DST" \
     || { red "  modules-load.d: ausente"; failures=$((failures + 1)); }
 
-  if lsmod | grep -q '^v4l2loopback'; then
+  # Lê /proc/modules em vez de `lsmod | grep -q`: com `set -o pipefail` (no
+  # topo deste script) aquele pipe SEMPRE reportava "não carregado". O
+  # `grep -q` sai no primeiro match e manda SIGPIPE pro `lsmod`, que termina
+  # com 141; o pipefail propaga o 141 e o `if` cai no else. Ou seja, a
+  # checagem nunca conseguia dizer "carregado" — só acertava por acidente
+  # quando o módulo realmente não estava.
+  if grep -q '^v4l2loopback ' /proc/modules; then
     green "  módulo: carregado"
   else
     red "  módulo: não carregado (sudo modprobe v4l2loopback)"; failures=$((failures + 1))
