@@ -36,6 +36,12 @@ progresso em [`specs/001-phone-webcam-bridge/`](specs/001-phone-webcam-bridge/).
 
 ## Instalação
 
+> 🚧 **Os pacotes abaixo ainda não estão publicados.** Enquanto não houver
+> release, os instaladores precisam ser
+> [compilados do código-fonte](#compilando-do-código-fonte). As instruções
+> desta seção descrevem como será a instalação quando os arquivos estiverem
+> disponíveis.
+
 ### Linux
 
 O CamLink precisa do módulo `v4l2loopback`, que é o que cria o dispositivo de
@@ -54,11 +60,12 @@ distribuição. O `scrcpy` fica de fora de propósito: o que o Debian/Ubuntu
 empacota é antigo demais (o CamLink precisa de ≥ 4.0) — veja
 [scrcpy antigo demais](#scrcpy-antigo-demais).
 
-**Arch / Manjaro / EndeavourOS** — pelo AUR:
+**Arch / Manjaro / EndeavourOS** — o pacote **ainda não está no AUR**, então
+`yay -S camlink` não encontra nada. O `PKGBUILD` existe em
+`installer/linux/PKGBUILD` e passa a funcionar assim que houver uma release
+publicada, porque ele baixa os fontes a partir da tag.
 
-```bash
-yay -S camlink
-```
+Por enquanto, no Arch, use o AppImage ou compile do código-fonte.
 
 **AppImage** — atenção, este é o único formato que **não se configura
 sozinho**.
