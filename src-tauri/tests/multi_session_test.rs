@@ -35,7 +35,12 @@ fn android_paths(extra_env: Vec<(String, String)>) -> ExternalPaths {
         adb: fake.clone(),
         scrcpy: fake,
         ffmpeg: PathBuf::from("ffmpeg"),
-        server_jar: PathBuf::from("scrcpy-server.jar"),
+        // Precisa ser um arquivo que EXISTE: `require_server_jar` valida
+        // isso antes de spawnar, porque um jar configurado mas ausente
+        // (pacote incompleto, SCRCPY_SERVER_PATH obsoleto) terminava em 6
+        // reconexões culpando o cabo USB. O fake_backend serve de stand-in:
+        // nada aqui o lê como jar de verdade.
+        server_jar: Some(fake_backend_path()),
         extra_env,
     }
 }

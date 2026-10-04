@@ -108,22 +108,6 @@ fn new_vcam_backend(ffmpeg: PathBuf) -> Box<dyn VirtualCameraBackend + Send> {
 /// convenção que o cliente real usa para o path default do servidor
 /// (`SC_SERVER_PATH_DEFAULT`, relativo ao próprio binário), só que via
 /// busca no PATH em vez de relativo ao instalador do CamLink.
-fn find_server_jar_next_to_scrcpy_binary() -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    let binary_name = if cfg!(windows) {
-        "scrcpy.exe"
-    } else {
-        "scrcpy"
-    };
-    std::env::split_paths(&path_var).find_map(|dir| {
-        if !dir.join(binary_name).is_file() {
-            return None;
-        }
-        let candidate = dir.join("scrcpy-server");
-        candidate.is_file().then_some(candidate)
-    })
-}
-
 // Diretório onde o instalador coloca os binários vendorizados
 // (`bundle.resources`): `<exe>\bin\` no Windows (T067),
 // `/usr/lib/CamLink/bin/` no `.deb` e `$APPDIR/usr/lib/CamLink/bin/` no
@@ -170,12 +154,23 @@ fn bundled_path(name: &str) -> Option<PathBuf> {
 /// procurado ao lado do binário `scrcpy` no PATH → `scrcpy-server` no
 /// diretório de trabalho como último recurso.
 fn resolve_external_paths() -> ExternalPaths {
+    // Só duas origens são válidas, e nenhuma delas é "o scrcpy-server que
+    // estiver por aí": o jar TEM que ser o do fork, senão o
+    // `CamLinkControlServer` não existe e os controles morrem em silêncio —
+    // que é exatamente o T091. Havia aqui um terceiro passo procurando
+    // `scrcpy-server` ao lado do binário no PATH; ele resolveria o jar
+    // OFICIAL do scrcpy e recriaria aquele bug, então saiu.
+    //
+    // `None` em vez de um `PathBuf::from("scrcpy-server")` de mentira: o
+    // placeholder relativo não existia em disco e, desde que o T091 passou
+    // a exportar `SCRCPY_SERVER_PATH` para o filho, ele virou autoritativo
+    // e quebrou o `cargo tauri dev` com 6 reconexões e uma mensagem
+    // culpando o cabo USB (bancada 2026-10-04). Quem não consegue resolver
+    // o jar precisa falhar dizendo isso.
     let server_jar = std::env::var("SCRCPY_SERVER_PATH")
         .ok()
         .map(PathBuf::from)
-        .or_else(|| bundled_file("scrcpy-server-camlink"))
-        .or_else(find_server_jar_next_to_scrcpy_binary)
-        .unwrap_or_else(|| PathBuf::from("scrcpy-server"));
+        .or_else(|| bundled_file("scrcpy-server-camlink"));
     ExternalPaths {
         adb: bundled_path("adb").unwrap_or_else(|| PathBuf::from("adb")),
         scrcpy: bundled_path("scrcpy").unwrap_or_else(|| PathBuf::from("scrcpy")),
@@ -2031,7 +2026,11 @@ pub fn run() {
         adb = %external.adb.display(),
         scrcpy = %external.scrcpy.display(),
         ffmpeg = %external.ffmpeg.display(),
-        server_jar = %external.server_jar.display(),
+        server_jar = external
+            .server_jar
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<não resolvido>".to_string()),
         "binários externos resolvidos"
     );
     // Achado ao validar o instalador Linux (T066): o polling de dispositivos

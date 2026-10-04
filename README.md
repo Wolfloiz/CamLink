@@ -396,12 +396,37 @@ baixa nada:
 ./installer/linux/vendor.sh --stub
 ```
 
-Para gerar pacote de verdade é preciso também o jar do fork, que exige JDK 17
-e o Android SDK:
+O `pnpm tauri dev` precisa do jar do fork (`scrcpy-server-camlink`), que é o
+servidor enviado ao celular. Em dev ele não vem de pacote nenhum, então
+aponte a variável para ele:
+
+```bash
+export SCRCPY_SERVER_PATH="$PWD/scrcpy/dist/scrcpy-server-camlink"
+pnpm tauri dev
+```
+
+Sem isso, iniciar uma fonte Android falha com `scrcpy_server_jar_ausente` e a
+dica de como resolver. O `scrcpy-server` oficial da sua distribuição **não**
+serve no lugar dele: ele não traz o servidor de controle do CamLink, e usá-lo
+daria vídeo com os controles mudos.
+
+Há dois jeitos de obter o jar. Construir exige JDK 17 e o Android SDK:
 
 ```bash
 cd scrcpy && ./build-camlink.sh dist && cd ..
-./installer/linux/vendor.sh          # baixa adb, ffmpeg e o cliente scrcpy
+```
+
+Ou baixar o da release, que é o mesmo artefato e já vem na versão certa:
+
+```bash
+gh release download v0.1.0 --repo Wolfloiz/CamLink \
+  --pattern 'scrcpy-server-camlink' --dir scrcpy/dist
+```
+
+Para gerar pacote, depois disso:
+
+```bash
+./installer/linux/vendor.sh          # adb, ffmpeg, cliente scrcpy e o jar
 ```
 
 O `vendor.sh` recusa empacotar se o jar e o cliente não forem da mesma

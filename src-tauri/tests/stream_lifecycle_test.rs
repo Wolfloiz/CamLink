@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use camlink_lib::model::{SessionSource, SessionState, StreamConfig, VideoCodec};
-use camlink_lib::stream_manager::{classify_stderr, ExternalPaths, StreamManager};
+use camlink_lib::stream_manager::{
+    classify_stderr, require_server_jar, ExternalPaths, StreamManager,
+};
 
 fn fake_backend_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake_backend"))
@@ -21,7 +23,12 @@ fn base_paths(extra_env: Vec<(String, String)>) -> ExternalPaths {
         adb: fake.clone(),
         scrcpy: fake,
         ffmpeg: PathBuf::from("ffmpeg"),
-        server_jar: PathBuf::from("scrcpy-server.jar"),
+        // Precisa ser um arquivo que EXISTE: `require_server_jar` valida
+        // isso antes de spawnar, porque um jar configurado mas ausente
+        // (pacote incompleto, SCRCPY_SERVER_PATH obsoleto) terminava em 6
+        // reconexões culpando o cabo USB. O fake_backend serve de stand-in:
+        // nada aqui o lê como jar de verdade.
+        server_jar: Some(fake_backend_path()),
         extra_env,
     }
 }
@@ -282,17 +289,60 @@ fn classify_stderr_ignores_unknown_lines() {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
+/// T094 (bancada 2026-10-04, `cargo tauri dev`): sem jar do fork resolvido,
+/// a sessão só morria e o supervisor reconectava 6 vezes, terminando em
+/// "desconecte e reconecte o cabo USB" — culpando o cabo por um jar que
+/// nunca existiu. A causa era o `PathBuf::from("scrcpy-server")` de
+/// placeholder, que o T091 tornou autoritativo ao exportá-lo para o filho.
+#[tokio::test]
+async fn sem_jar_do_fork_o_erro_e_acionavel_e_nao_reconexao() {
+    let mut paths = base_paths(Vec::new());
+    paths.server_jar = None;
+
+    let err =
+        require_server_jar(&paths).expect_err("sem jar resolvido tem que ser erro, não tentativa");
+
+    assert_eq!(err.code, "scrcpy_server_jar_ausente");
+    assert!(
+        err.action_hint.is_some(),
+        "o erro precisa dizer o que fazer, não só que falhou"
+    );
+}
+
+/// Jar configurado mas ausente em disco (pacote incompleto,
+/// `SCRCPY_SERVER_PATH` apontando pra um build apagado) cai no mesmo erro
+/// acionável — era o outro caminho para as 6 reconexões.
+#[tokio::test]
+async fn jar_do_fork_configurado_mas_ausente_tambem_e_acionavel() {
+    let mut paths = base_paths(Vec::new());
+    paths.server_jar = Some(PathBuf::from("/tmp/camlink-jar-que-nao-existe"));
+
+    let err = require_server_jar(&paths).expect_err("jar ausente em disco tem que ser erro");
+
+    assert_eq!(err.code, "scrcpy_server_jar_ausente");
+    assert!(
+        err.msg.contains("camlink-jar-que-nao-existe"),
+        "a mensagem deve dizer QUAL caminho faltou, senão não ajuda a corrigir: {}",
+        err.msg
+    );
+}
+
 #[tokio::test]
 async fn scrcpy_client_receives_the_fork_jar_path() {
     let dump = tempfile::NamedTempFile::new().expect("temp");
     let dump_path = dump.path().to_path_buf();
 
-    let jar = PathBuf::from("/usr/lib/CamLink/bin/scrcpy-server-camlink");
+    // Arquivo real, e não um caminho simbólico tipo
+    // `/usr/lib/CamLink/bin/scrcpy-server-camlink`: aquele não existe na
+    // máquina de quem roda os testes, e o teste só passava porque nada
+    // checava existência. `require_server_jar` agora checa.
+    let jar_file = tempfile::NamedTempFile::new().expect("temp do jar");
+    let jar = jar_file.path().to_path_buf();
     let mut paths = base_paths(vec![(
         "FAKE_BACKEND_ENV_DUMP".into(),
         dump_path.display().to_string(),
     )]);
-    paths.server_jar = jar.clone();
+    paths.server_jar = Some(jar.clone());
 
     let manager = StreamManager::new(paths);
     let session_id = manager
