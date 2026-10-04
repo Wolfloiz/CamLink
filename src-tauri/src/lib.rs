@@ -22,7 +22,7 @@ pub mod secrets;
 pub mod stream_manager;
 pub mod virtualcam;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -291,6 +291,21 @@ struct AppState {
     /// trocas em hardware, 2026-07-24) — o lock garante que cada restart
     /// termina (stop + spawn) antes do próximo começar.
     restart_locks: TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>,
+    /// `session_id`s que estão sendo SUBSTITUÍDOS por um restart
+    /// (`switch_camera`/rotação), e não encerrados pelo usuário.
+    ///
+    /// O emissor de `session_state` manda um último evento com
+    /// `state: idle` quando a sessão morre, e o frontend trata `idle` como
+    /// "a fonte acabou": apaga o card e colapsa o painel. Num restart isso
+    /// é falso — a fonte continua lá, só com `session_id` novo — e o card
+    /// desaparecia debaixo do usuário no meio da troca de câmera.
+    ///
+    /// A marca é posta ANTES do `stop()` porque a correção precisa ser
+    /// determinística: `stop()` só retorna depois do estado virar `Idle`, e
+    /// a partir daí o monitor pode emitir a qualquer momento dentro do
+    /// próximo tick. Tentar "remover a sessão rápido depois do stop" deixa
+    /// essa janela aberta.
+    replaced_sessions: TokioMutex<HashSet<Uuid>>,
 }
 
 /// Conta fontes ativas nos dois registries (Android + RTSP) para o gate de
@@ -1152,6 +1167,9 @@ async fn restart_android_session(
     let lock = restart_lock_for(state, &serial).await;
     let _restart_guard = lock.lock().await;
 
+    // Antes do stop, não depois: ver doc de `AppState::replaced_sessions`.
+    state.replaced_sessions.lock().await.insert(old_session_id);
+
     state.stream_manager.stop(old_session_id).await?;
     if let Some(mut old_ctx) = state.sessions.lock().await.remove(&old_session_id) {
         release_control_forward(&mut old_ctx).await;
@@ -1797,6 +1815,25 @@ fn spawn_preview_encoder(
     })
 }
 
+/// Decide se o `idle` de uma sessão deve ser anunciado ao frontend, e
+/// consome a marca de substituição no caminho.
+///
+/// `false` só para sessão substituída por restart (`switch_camera`/rotação):
+/// ali `idle` significa "trocou de `session_id`", não "a fonte acabou", e o
+/// frontend apaga o card ao ouvir `idle`. Ver `AppState::replaced_sessions`.
+///
+/// A rotação 90°/270° sofria do mesmo problema, mais silenciosamente: o
+/// `idle` apagava a fonte e o `session_replaced` que vinha depois não
+/// achava mais o índice, então o card desaparecia com o stream vivo por
+/// baixo. O conserto aqui cobre os dois porque `restart_android_session` é
+/// compartilhado.
+///
+/// A marca é consumida (one-shot) para o `HashSet` não crescer sem limite ao
+/// longo de uma sessão com muitas trocas de câmera.
+async fn should_announce_idle(replaced: &TokioMutex<HashSet<Uuid>>, session_id: Uuid) -> bool {
+    !replaced.lock().await.remove(&session_id)
+}
+
 /// Emite `session_state` a cada tick (`SESSION_STATE_POLL_INTERVAL`) até a
 /// sessão voltar a `Idle` (FR-010) — inclui fps/reconnects atualizados, que
 /// mudam sem necessariamente trocar de `SessionState`. Cada `start_stream`
@@ -1817,6 +1854,10 @@ fn spawn_session_state_emitter(
                 state.stream_manager.session(session_id).await
             };
             let Some(mut session) = session else {
+                // Sessão já saiu do registry: nada a reportar, e a marca de
+                // substituição (se houver) não serve mais pra ninguém.
+                let state = app.state::<AppState>();
+                state.replaced_sessions.lock().await.remove(&session_id);
                 break;
             };
 
@@ -1845,6 +1886,26 @@ fn spawn_session_state_emitter(
             // de SessionState nenhuma — só emitir "toda transição" (leitura
             // literal do contrato) deixava o fps aparecer travado no
             // frontend o tempo todo.
+            if session.state == SessionState::Idle {
+                // `idle` de uma sessão SUBSTITUÍDA não pode ser anunciado: o
+                // frontend leria como "a fonte acabou" e apagaria o card no
+                // meio do restart (achado em bancada 2026-10-04, clicando em
+                // Frontal/Traseira). Quem informa a troca ao frontend é o
+                // retorno do próprio comando (`switch_camera`) ou o evento
+                // `session_replaced` (rotação) — nunca este `idle`.
+                let announce = {
+                    let state = app.state::<AppState>();
+                    // Ligado a um local antes de fechar o bloco: o guard do
+                    // mutex é um temporário da expressão final e seria
+                    // dropado DEPOIS de `state`, que ele empresta (E0597).
+                    let ok = should_announce_idle(&state.replaced_sessions, session_id).await;
+                    ok
+                };
+                if !announce {
+                    break;
+                }
+            }
+
             let payload = SessionStateEvent {
                 session_id,
                 state: session.state.clone(),
@@ -2004,6 +2065,7 @@ pub fn run() {
         sessions: TokioMutex::new(HashMap::new()),
         rtsp: rtsp_sessions,
         restart_locks: TokioMutex::new(HashMap::new()),
+        replaced_sessions: TokioMutex::new(HashSet::new()),
     };
 
     tauri::Builder::default()
@@ -2058,6 +2120,45 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T093 (bancada 2026-10-04): clicar em Frontal/Traseira derrubava o
+    /// card da fonte e estourava `TypeError: null is not an object` no
+    /// frontend. O restart para a sessão antiga, o emissor mandava um último
+    /// `session_state` com `idle`, e o frontend trata `idle` como "a fonte
+    /// acabou" — apagava a fonte e colapsava o painel no meio da troca.
+    #[tokio::test]
+    async fn idle_de_sessao_substituida_nao_e_anunciado() {
+        let replaced = TokioMutex::new(HashSet::new());
+        let trocando = Uuid::new_v4();
+        let parando = Uuid::new_v4();
+
+        // Marca posta pelo restart ANTES do stop (ver restart_android_session).
+        replaced.lock().await.insert(trocando);
+
+        assert!(
+            !should_announce_idle(&replaced, trocando).await,
+            "idle de sessão substituída por restart não pode ser anunciado"
+        );
+        assert!(
+            should_announce_idle(&replaced, parando).await,
+            "idle de sessão encerrada de verdade continua sendo anunciado"
+        );
+    }
+
+    /// A marca é one-shot: sem consumir, o `HashSet` cresceria a cada troca
+    /// de câmera durante toda a vida do app.
+    #[tokio::test]
+    async fn marca_de_substituicao_e_consumida() {
+        let replaced = TokioMutex::new(HashSet::new());
+        let id = Uuid::new_v4();
+        replaced.lock().await.insert(id);
+
+        assert!(!should_announce_idle(&replaced, id).await);
+        assert!(
+            replaced.lock().await.is_empty(),
+            "a marca tem que sair do set depois de usada"
+        );
+    }
 
     /// T1.3 (FR-023): o encode de preview roda numa task própria alimentada
     /// por um canal `watch` (sempre o frame mais recente, sem fila) — o loop
