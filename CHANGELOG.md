@@ -33,6 +33,10 @@ estabilidade de 2 h ainda não foram concluídos. Acompanhe em
 - **Instaladores**: `.deb` e AppImage no Linux, `PKGBUILD` para o AUR, NSIS e
   MSI no Windows. Os pacotes configuram o `v4l2loopback` e o grupo `video`
   na instalação, sem exigir terminal.
+- **O cliente `scrcpy` vem embutido** nos pacotes Linux, na versão exata
+  exigida pelo fork que roda no celular. Você não instala nem atualiza nada
+  por fora, e uma atualização do `scrcpy` da sua distribuição não quebra o
+  CamLink — [por quê](README.md#por-que-o-scrcpy-vai-embutido).
 - **Câmera virtual própria no Windows**, via um filtro DirectShow do próprio
   CamLink — sem depender de driver de terceiros.
 - **Diagnóstico de pré-requisitos** no Linux: `install.sh --check` lista o

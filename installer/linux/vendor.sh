@@ -5,11 +5,9 @@
 # Roda ANTES do `pnpm tauri build` — não faz parte do runtime do app.
 # Idempotente: pode rodar de novo a qualquer momento.
 #
-#   ./vendor.sh                    jar do fork + adb + ffmpeg em vendor/bin/
-#   ./vendor.sh --jar-only         só o jar do fork (é o que o .deb precisa)
-#   ./vendor.sh --scrcpy --prefix /opt/camlink
-#                                  instala o scrcpy oficial num prefixo
-#                                  (usado pelo install.sh --with-scrcpy)
+#   ./vendor.sh                    jar do fork + adb + ffmpeg + scrcpy
+#   ./vendor.sh --jar-only         só o jar do fork
+#   ./vendor.sh --vendor-scrcpy    só o cliente scrcpy na versão pinada
 #   ./vendor.sh --stub             placeholders vazios, sem baixar nada —
 #                                  o build.rs do tauri-build exige que todo
 #                                  path de bundle.resources exista em
@@ -22,6 +20,12 @@
 # binário GPL no pacote. O AppImage, que precisa ser autocontido, leva a
 # cópia vendorizada daqui — ver `bundle.linux.appimage.files` em
 # src-tauri/tauri.linux.conf.json.
+#
+# O scrcpy é a exceção: vai embutido nos DOIS (T092), porque a exigência é
+# de versão exata e não de um piso — ver SCRCPY_PINNED abaixo. O prebuilt do
+# upstream serve para isso: linka SDL2 e libav* estaticamente (daí os 33 MB)
+# e em runtime só precisa de libc, libm, libgcc_s e libudev, presentes em
+# qualquer distro com systemd — verificado com `ldd` na 4.1.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,18 +39,29 @@ TMP_DIR="$SCRIPT_DIR/vendor/.tmp"
 FFMPEG_ASSET="${FFMPEG_ASSET:-ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz}"
 FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$FFMPEG_ASSET"
 PLATFORM_TOOLS_URL="https://dl.google.com/android/repository/platform-tools-latest-linux.zip"
-SCRCPY_API="https://api.github.com/repos/Genymobile/scrcpy/releases/latest"
+
+# Versão do cliente scrcpy embutida no pacote. NÃO é "a mais recente" de
+# propósito: o scrcpy exige que cliente e servidor tenham EXATAMENTE a mesma
+# versão (`The server version (X) does not match the client (Y)`), e o nosso
+# fork é compilado sobre esta tag. Baixar "latest" quebraria o app toda vez
+# que o upstream publicasse — foi assim que o scrcpy 4.1 da distro quebrou a
+# instalação com o fork 4.0 (bancada 2026-10-04).
+#
+# Ao rebasear o fork para uma versão nova do scrcpy, atualize AQUI também.
+SCRCPY_PINNED="v4.1"
+# sha256 do tarball de $SCRCPY_PINNED. Pinar a versão sem pinar o conteúdo
+# deixaria o build dependendo de um asset mutável; é o mesmo hash que o
+# PKGBUILD declara em sha256sums. Atualize junto com SCRCPY_PINNED.
+SCRCPY_PINNED_SHA256="ad56ae8bfeedf41e824945c11dbf55fcb092b3e615b9b486f48a50e30d389635"
 
 MODE=all
-PREFIX=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --jar-only) MODE=jar ;;
-    --scrcpy)   MODE=scrcpy ;;
+    --vendor-scrcpy) MODE=vendor-scrcpy ;;
     --stub)     MODE=stub ;;
-    --prefix)   PREFIX="$2"; shift ;;
-    -h|--help)  sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)  sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "opção desconhecida: $1" >&2; exit 1 ;;
   esac
   shift
@@ -62,7 +77,7 @@ done
 # antes de gerar pacote pra valer.
 if [[ "$MODE" == "stub" ]]; then
   mkdir -p "$VENDOR_BIN"
-  for f in scrcpy-server-camlink adb ffmpeg; do
+  for f in scrcpy-server-camlink adb ffmpeg scrcpy; do
     : >"$VENDOR_BIN/$f"
     echo "  -> $f (stub)"
   done
@@ -97,8 +112,52 @@ vendor_jar() {
       exit 1
     fi
   fi
+  assert_jar_matches_pin "$src"
   install -Dm644 "$src" "$VENDOR_BIN/scrcpy-server-camlink"
-  echo "  -> scrcpy-server-camlink"
+  echo "  -> scrcpy-server-camlink ($(pinned_version))"
+}
+
+# `SCRCPY_PINNED` sem o "v" — é o formato que o scrcpy usa internamente.
+pinned_version() { echo "${SCRCPY_PINNED#v}"; }
+
+# O par cliente+servidor TEM que ser da mesma versão: o scrcpy aborta com
+# "The server version (X) does not match the client (Y)" e nenhum celular
+# conecta. Até a 0.1.0 isso não era checado em lugar nenhum, e a divergência
+# só aparecia no celular do usuário — o jar saiu na 4.0 e o cliente da distro
+# foi para a 4.1. As duas checagens abaixo cobrem os dois jeitos de errar:
+#
+#   1. fork não rebaseado (ou pin não atualizado): `versionName` do
+#      server/build.gradle diverge do SCRCPY_PINNED;
+#   2. jar velho em dist/: o fork está certo mas ninguém rodou
+#      build-camlink.sh depois do rebase — é o caso mais traiçoeiro, porque
+#      o repositório inteiro parece correto.
+assert_jar_matches_pin() { # $1 = caminho do jar
+  need unzip
+  local want gradle_version
+  want="$(pinned_version)"
+
+  local gradle="$REPO_ROOT/scrcpy/server/build.gradle"
+  if [[ -f "$gradle" ]]; then
+    gradle_version="$(sed -n 's/.*versionName *"\([^"]*\)".*/\1/p' "$gradle" | head -1)"
+    if [[ -n "$gradle_version" && "$gradle_version" != "$want" ]]; then
+      echo "O fork em scrcpy/ está na versão $gradle_version, mas SCRCPY_PINNED é $SCRCPY_PINNED." >&2
+      echo "Rebaseie o fork na tag v$want OU atualize SCRCPY_PINNED — as duas têm que casar." >&2
+      exit 1
+    fi
+  fi
+
+  # A versão fica no classes.dex como string: byte de tamanho + MUTF-8.
+  # Procurar só "$want" casaria com qualquer número parecido no binário.
+  local len prefix
+  len="$(printf '%s' "$want" | wc -c)"
+  # Byte de tamanho de verdade, e não o texto "\x03": o printf de fora
+  # precisa receber a sequência já montada pelo de dentro.
+  prefix="$(printf "\\x$(printf '%02x' "$len")")"
+  if ! unzip -p "$1" classes.dex 2>/dev/null | grep -aqF "$prefix$want"; then
+    echo "O jar em scrcpy/dist/ não é da versão $want." >&2
+    echo "Rode scrcpy/build-camlink.sh depois do rebase (precisa de JDK 17 + Android SDK)." >&2
+    exit 1
+  fi
 }
 
 # --- adb (Google, oficial) --------------------------------------------------
@@ -126,41 +185,36 @@ vendor_ffmpeg() {
   echo "  -> ffmpeg"
 }
 
-# --- scrcpy oficial (release prebuilt do upstream) --------------------------
-# Só para quem não tem uma versão recente na distro (install.sh
-# --with-scrcpy). Não entra no AppImage: o cliente scrcpy linka SDL2 +
-# libav*, e arrastar essa árvore para dentro do AppImage é frágil — o
-# AppImage funciona sozinho para RTSP e pede scrcpy para fontes Android.
-install_scrcpy() {
+# --- cliente scrcpy, versão pinada, para DENTRO do pacote ----------------
+# Embutir em vez de depender da distro porque a exigência real é de versão
+# EXATA, não ">= 4.0" como o projeto declarava: qualquer atualização da
+# distro quebraria o app sem nada que pudéssemos fazer.
+vendor_scrcpy() {
   need tar
-  [[ -n "$PREFIX" ]] || { echo "--scrcpy exige --prefix <dir>" >&2; exit 1; }
-  echo "== scrcpy (release oficial) =="
-  local url
-  url="$(curl -fsSL "$SCRCPY_API" \
-        | grep -oE '"browser_download_url": *"[^"]*scrcpy-linux-x86_64-[^"]*\.tar\.gz"' \
-        | head -1 | cut -d'"' -f4)"
-  [[ -n "$url" ]] || {
-    echo "não achei o asset linux-x86_64 na release mais recente do scrcpy." >&2
-    echo "Instale manualmente: https://github.com/Genymobile/scrcpy/releases" >&2
+  echo "== scrcpy $SCRCPY_PINNED (cliente, embutido) =="
+  local url="https://github.com/Genymobile/scrcpy/releases/download/$SCRCPY_PINNED/scrcpy-linux-x86_64-$SCRCPY_PINNED.tar.gz"
+  fetch "$url" "$TMP_DIR/scrcpy-pin.tar.gz"
+
+  local actual
+  actual="$(sha256sum "$TMP_DIR/scrcpy-pin.tar.gz" | cut -d' ' -f1)"
+  if [[ "$actual" != "$SCRCPY_PINNED_SHA256" ]]; then
+    echo "sha256 do scrcpy $SCRCPY_PINNED não bate:" >&2
+    echo "  esperado $SCRCPY_PINNED_SHA256" >&2
+    echo "  obtido   $actual" >&2
     exit 1
-  }
-  fetch "$url" "$TMP_DIR/scrcpy.tar.gz"
-  rm -rf "$TMP_DIR/scrcpy" && mkdir -p "$TMP_DIR/scrcpy"
-  tar -xzf "$TMP_DIR/scrcpy.tar.gz" -C "$TMP_DIR/scrcpy" --strip-components=1
-  mkdir -p "$PREFIX/bin" "$PREFIX/share/scrcpy"
-  install -Dm755 "$TMP_DIR/scrcpy/scrcpy" "$PREFIX/bin/scrcpy"
-  # O cliente oficial procura o jar ao lado do binário; o CamLink sobrepõe
-  # com o jar do fork em runtime (SCRCPY_SERVER_PATH / resource do pacote),
-  # mas o jar de origem tem que existir para o scrcpy avulso funcionar.
-  [[ -f "$TMP_DIR/scrcpy/scrcpy-server" ]] && install -Dm644 "$TMP_DIR/scrcpy/scrcpy-server" "$PREFIX/bin/scrcpy-server"
-  echo "  -> $PREFIX/bin/scrcpy"
+  fi
+
+  rm -rf "$TMP_DIR/scrcpy-pin" && mkdir -p "$TMP_DIR/scrcpy-pin"
+  tar -xzf "$TMP_DIR/scrcpy-pin.tar.gz" -C "$TMP_DIR/scrcpy-pin" --strip-components=1
+  install -Dm755 "$TMP_DIR/scrcpy-pin/scrcpy" "$VENDOR_BIN/scrcpy"
+  echo "  -> scrcpy ($SCRCPY_PINNED)"
 }
 
 mkdir -p "$VENDOR_BIN" "$TMP_DIR"
 case "$MODE" in
-  jar)    vendor_jar ;;
-  scrcpy) install_scrcpy ;;
-  all)    vendor_jar; vendor_adb; vendor_ffmpeg ;;
+  jar)           vendor_jar ;;
+  vendor-scrcpy) vendor_scrcpy ;;
+  all)           vendor_jar; vendor_adb; vendor_ffmpeg; vendor_scrcpy ;;
 esac
 rm -rf "$TMP_DIR"
-[[ "$MODE" == "scrcpy" ]] || echo -e "\nVendoring concluído em $VENDOR_BIN"
+echo -e "\nVendoring concluído em $VENDOR_BIN"

@@ -9,8 +9,10 @@ Discord). GPL-3.0.
 - **Rust stable** (rust-toolchain.toml) — backend em `src-tauri/`
 - **Tauri 2.x + SvelteKit** — GUI; bundling .deb/AppImage/NSIS/MSI
 - **Java 17** — somente no fork do scrcpy-server (submodule `scrcpy/`, branch
-  `camlink`; roda no Android)
-- Runtime: adb, scrcpy ≥ 4.0, ffmpeg, v4l2loopback ≥ 0.13 (Linux), filtro
+  `camlink-4.1`, rebaseada na tag v4.1 do upstream; roda no Android)
+- Runtime: adb, ffmpeg, v4l2loopback ≥ 0.13 (Linux), cliente scrcpy embutido
+  no pacote na versão EXATA do fork (`SCRCPY_PINNED` em vendor.sh — não é
+  um piso de versão, o scrcpy aborta se cliente != servidor), filtro
   DirectShow próprio via `windows-rs` (Windows — akvirtualcamera reprovado no
   Spike B, ver research.md R4)
 - Crates-chave: tokio, serde, tracing, keyring, thiserror

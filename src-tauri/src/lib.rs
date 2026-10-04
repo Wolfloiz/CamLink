@@ -152,11 +152,20 @@ fn bundled_path(name: &str) -> Option<PathBuf> {
 }
 
 /// Caminhos dos executáveis externos. Ordem de resolução pra
-/// `adb`/`ffmpeg`: bundled pelo instalador (`bundled_path`, T067) → PATH
-/// (fallback usado em dev, `cargo tauri dev` sem instalador — quickstart.md
-/// pré-requisitos cobre esse caso). `scrcpy` fica só em PATH: o cliente não
-/// é usado em runtime no Windows (R12 — só Linux invoca `--v4l2-sink`), não
-/// é embutido pelo instalador. O jar do scrcpy-server vem, em ordem:
+/// `adb`/`ffmpeg`/`scrcpy`: bundled pelo instalador (`bundled_path`, T067)
+/// → PATH (fallback usado em dev, `cargo tauri dev` sem instalador —
+/// quickstart.md pré-requisitos cobre esse caso).
+///
+/// O `scrcpy` passou a ser embutido (T092) porque a exigência real é de
+/// versão EXATA, não ">= 4.0" como o projeto declarava: o scrcpy recusa
+/// rodar se cliente e servidor divergirem (`The server version (X) does not
+/// match the client (Y)`), e o servidor é o nosso fork. Depender da versão
+/// da distro significava quebrar a cada atualização dela — foi o que
+/// aconteceu quando o Arch foi para a 4.1 com o fork ainda na 4.0. No
+/// Windows o cliente não é usado em runtime (R12 — só Linux invoca
+/// `--v4l2-sink`), então lá o fallback de PATH segue valendo e é inócuo.
+///
+/// O jar do scrcpy-server vem, em ordem:
 /// `SCRCPY_SERVER_PATH` se definida (T037) → bundled pelo instalador →
 /// procurado ao lado do binário `scrcpy` no PATH → `scrcpy-server` no
 /// diretório de trabalho como último recurso.
@@ -169,7 +178,7 @@ fn resolve_external_paths() -> ExternalPaths {
         .unwrap_or_else(|| PathBuf::from("scrcpy-server"));
     ExternalPaths {
         adb: bundled_path("adb").unwrap_or_else(|| PathBuf::from("adb")),
-        scrcpy: PathBuf::from("scrcpy"),
+        scrcpy: bundled_path("scrcpy").unwrap_or_else(|| PathBuf::from("scrcpy")),
         ffmpeg: bundled_path("ffmpeg").unwrap_or_else(|| PathBuf::from("ffmpeg")),
         server_jar,
         extra_env: Vec::new(),
