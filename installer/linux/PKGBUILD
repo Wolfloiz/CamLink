@@ -7,8 +7,10 @@
 # não são dependências razoáveis para um pacote de desktop — vem pronto como
 # asset da release (mesmo jar que o instalador Windows/deb embutem, FR-024).
 #
-# Ao publicar uma release, troque os dois `SKIP` de `sha256sums` pelos hashes
-# reais (`makepkg -g`) e gere o .SRCINFO (`makepkg --printsrcinfo > .SRCINFO`).
+# Ao publicar uma release, troque os dois `SKIP` de `sha256sums` (o tarball
+# do GitHub e o jar) pelos hashes reais (`makepkg -g`) e gere o .SRCINFO
+# (`makepkg --printsrcinfo > .SRCINFO`). O terceiro hash, do cliente scrcpy,
+# já é fixo — só muda quando $_scrcpyver mudar.
 pkgname=camlink
 pkgver=0.1.0
 pkgrel=1
@@ -16,20 +18,36 @@ pkgdesc="Câmeras Android (USB) e fontes IP/RTSP como webcams virtuais"
 arch=('x86_64')
 url="https://github.com/Wolfloiz/CamLink"
 license=('GPL-3.0-or-later')
-# scrcpy só é necessário para fontes Android (RTSP funciona sem), mas o Arch
-# empacota uma versão atual — diferente do Debian/Ubuntu, onde a versão da
-# distro é antiga demais e o install.sh cuida disso.
-depends=('webkit2gtk-4.1' 'gtk3' 'ffmpeg' 'android-tools' 'scrcpy>=4.0'
+# `scrcpy` NÃO entra em depends de propósito. A exigência não é um piso de
+# versão e sim igualdade: o scrcpy aborta se cliente e servidor divergirem
+# ("The server version (X) does not match the client (Y)"), e o servidor é o
+# nosso fork. Depender do pacote da distro significa quebrar o app na
+# primeira atualização dele — foi exatamente o que aconteceu quando o Arch
+# foi para o scrcpy 4.1 com o fork ainda na 4.0. O cliente, portanto, vai
+# embutido no pacote (binário oficial do upstream, em $_scrcpyver).
+depends=('webkit2gtk-4.1' 'gtk3' 'ffmpeg' 'android-tools'
          'v4l2loopback-dkms>=0.13' 'v4l2loopback-utils' 'v4l-utils')
 # `cargo` é virtual (provido por `rust` OU `rustup`) — listar `rust`
 # explícito impediria quem usa rustup de buildar, porque rustup declara
 # Conflicts com rust/cargo.
 makedepends=('cargo' 'nodejs' 'pnpm' 'git')
 install="${pkgname}.install"
+
+# Versão do cliente scrcpy embutido. TEM que ser a mesma do fork em
+# scrcpy/server/build.gradle (versionName) e a mesma de SCRCPY_PINNED em
+# installer/linux/vendor.sh — os três andam juntos a cada rebase do fork.
+_scrcpyver=4.1
+
+# O cliente vem como source() em vez de ser baixado no build(): o makepkg
+# exige que toda entrada de rede esteja aqui, com checksum, para o pacote ser
+# verificável e reproduzível (e para `makepkg --noextract`/mirrors locais
+# funcionarem). Baixar dentro de build() reprovaria na revisão do AUR.
 source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz"
-        "scrcpy-server-camlink-${pkgver}::${url}/releases/download/v${pkgver}/scrcpy-server-camlink")
+        "scrcpy-server-camlink-${pkgver}::${url}/releases/download/v${pkgver}/scrcpy-server-camlink"
+        "https://github.com/Genymobile/scrcpy/releases/download/v${_scrcpyver}/scrcpy-linux-x86_64-v${_scrcpyver}.tar.gz")
 sha256sums=('SKIP'
-            'SKIP')
+            'SKIP'
+            'ad56ae8bfeedf41e824945c11dbf55fcb092b3e615b9b486f48a50e30d389635')
 
 build() {
   cd "${srcdir}/CamLink-${pkgver}"
@@ -46,6 +64,12 @@ build() {
   install -Dm644 "${srcdir}/scrcpy-server-camlink-${pkgver}" \
     "installer/linux/vendor/bin/scrcpy-server-camlink"
 
+  # Mesmo motivo para o cliente: ele também é `bundle.resources` agora.
+  # Vem do tarball oficial já extraído pelo makepkg, não de vendor.sh — este
+  # baixaria da rede durante o build.
+  install -Dm755 "${srcdir}/scrcpy-linux-x86_64-v${_scrcpyver}/scrcpy" \
+    "installer/linux/vendor/bin/scrcpy"
+
   cd src-tauri
   cargo build --release --locked --bin camlink
 }
@@ -60,6 +84,10 @@ package() {
   # jar do fork.
   install -Dm644 "${srcdir}/scrcpy-server-camlink-${pkgver}" \
     "${pkgdir}/usr/lib/CamLink/bin/scrcpy-server-camlink"
+
+  # Cliente scrcpy oficial na versão exata do fork (ver $_scrcpyver).
+  install -Dm755 "${srcdir}/scrcpy-linux-x86_64-v${_scrcpyver}/scrcpy" \
+    "${pkgdir}/usr/lib/CamLink/bin/scrcpy"
 
   install -Dm644 "installer/linux/99-camlink-v4l2loopback.rules" \
     "${pkgdir}/usr/lib/udev/rules.d/99-camlink-v4l2loopback.rules"

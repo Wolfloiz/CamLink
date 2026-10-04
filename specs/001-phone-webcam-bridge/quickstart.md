@@ -10,13 +10,13 @@ cargo fmt --check && cargo clippy -- -D warnings && cargo test   # em src-tauri/
 
 ## Pré-requisitos
 
-- **Linux**: Ubuntu 22.04+/Arch; `adb`, `scrcpy ≥ 4.0`, `ffmpeg`,
-  `v4l2loopback-dkms (≥ 0.13)`, `v4l-utils` — `installer/linux/install.sh`
-  instala tudo (udev rule do `/dev/v4l2loopback`, modules-load.d e o usuário
-  no grupo `video`; sem polkit — nenhum caminho do app é privilegiado, ver
-  T066). `install.sh --check` diagnostica o que falta. O `scrcpy` da distro
-  costuma ser antigo demais no Debian/Ubuntu: use `--with-scrcpy` ou instale
-  o build oficial.
+- **Linux**: Ubuntu 22.04+/Arch; `adb`, `ffmpeg`, `v4l2loopback-dkms (≥
+  0.13)`, `v4l-utils` — `installer/linux/install.sh` instala tudo (udev rule
+  do `/dev/v4l2loopback`, modules-load.d e o usuário no grupo `video`; sem
+  polkit — nenhum caminho do app é privilegiado, ver T066). `install.sh
+  --check` diagnostica o que falta. O cliente `scrcpy` NÃO é pré-requisito:
+  vai embutido no pacote na versão exata do fork (T092), porque o scrcpy
+  aborta se cliente e servidor divergirem — não é um piso de versão.
 - **Windows 10/11**: instalador NSIS/MSI do CamLink (inclui adb, scrcpy,
   ffmpeg e registra o filtro DirectShow próprio do CamLink — sem driver de
   terceiros).
@@ -106,7 +106,7 @@ Com stream ativo no OBS:
 | Situação | Comportamento esperado |
 |---|---|
 | Secure Boot bloqueia v4l2loopback | Erro com guia de assinatura do módulo |
-| scrcpy ausente/versão < 4.0 | Erro com instrução de instalação |
+| scrcpy embutido ausente (pacote corrompido) | Erro com instrução de reinstalação |
 | Android < 12 | Listado como incompatível com motivo (FR-002a) |
 | Firefox não enumera (Linux) | App oferece launcher com `v4l2compat.so` |
 | Dois jobs RAW simultâneos | Segundo rejeitado com `BUSY` |

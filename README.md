@@ -56,9 +56,9 @@ sudo apt install ./CamLink_0.1.0_amd64.deb
 ```
 
 As dependências (`adb`, `ffmpeg`, `v4l-utils`, `v4l2loopback-dkms`) vêm da
-distribuição. O `scrcpy` fica de fora de propósito: o que o Debian/Ubuntu
-empacota é antigo demais (o CamLink precisa de ≥ 4.0) — veja
-[scrcpy antigo demais](#scrcpy-antigo-demais).
+distribuição. O `scrcpy` **não** é uma delas: o cliente vai embutido no
+pacote, na versão exata que o CamLink precisa — você não instala nem
+atualiza nada por fora. Veja [por que embutido](#por-que-o-scrcpy-vai-embutido).
 
 **Arch / Manjaro / EndeavourOS** — o pacote **ainda não está no AUR**, então
 `yay -S camlink` não encontra nada. O `PKGBUILD` existe em
@@ -165,7 +165,7 @@ CamLink — diagnóstico de pré-requisitos
   adb: /usr/bin/adb
   ffmpeg: /usr/bin/ffmpeg
   v4l2loopback-ctl: /usr/bin/v4l2loopback-ctl
-  scrcpy: 4.0
+  scrcpy embutido: scrcpy 4.1
   v4l2loopback-ctl: 0.15.4
   udev rule: /usr/lib/udev/rules.d/99-camlink-v4l2loopback.rules
   modules-load.d: /usr/lib/modules-load.d/camlink-v4l2loopback.conf
@@ -238,17 +238,26 @@ saídas são assinar o módulo com uma chave MOK própria ou desativar o Secure
 Boot na UEFI. O CamLink detecta esse caso e mostra a orientação na própria
 tela.
 
-### scrcpy antigo demais
+### Por que o scrcpy vai embutido
 
-O CamLink precisa de **scrcpy ≥ 4.0** para fontes Android. Câmeras RTSP
-funcionam sem ele. Debian, Ubuntu e derivados costumam empacotar versões bem
-anteriores; para instalar a oficial:
+O CamLink usa um fork do `scrcpy-server` (a parte que roda no celular) e o
+scrcpy **recusa funcionar se cliente e servidor não forem exatamente da
+mesma versão** — ele aborta com `The server version (X) does not match the
+client (Y)`. Não é um piso de versão: é igualdade.
+
+Por isso o cliente não vem da distribuição. Até a versão 0.1.0 ele vinha, e
+o resultado era previsível: o Arch atualizou o pacote para 4.1 enquanto o
+fork estava na 4.0 e o CamLink parou de conectar em qualquer celular, numa
+máquina onde nada do CamLink havia mudado. Agora o cliente é empacotado
+junto, e cada release do CamLink carrega o par cliente+servidor casado.
+
+Se você tiver um `scrcpy` instalado pela distro, ele é ignorado e continua
+funcionando normalmente para o seu próprio uso. Para confirmar qual o
+CamLink está usando:
 
 ```bash
-sudo ./installer/linux/install.sh --with-scrcpy
+./installer/linux/install.sh --check   # linha "scrcpy embutido:"
 ```
-
-No Arch a versão dos repositórios já serve.
 
 ### O celular aparece como incompatível
 
@@ -312,7 +321,9 @@ introduzir uma requisição externa sem que isso apareça como violação.
 
 Os binários que o CamLink executa (`adb`, `scrcpy`, `ffmpeg`,
 `v4l2loopback-ctl`) são de terceiros e vêm da sua distribuição ou embutidos
-no instalador; o projeto não os modifica.
+no instalador; o projeto não os modifica. O `scrcpy` embutido é o build
+oficial do upstream, baixado da release do Genymobile sem alteração — só o
+`scrcpy-server`, que roda no celular, é o nosso fork (código em `scrcpy/`).
 
 ## Limitações conhecidas
 
@@ -358,8 +369,9 @@ Veja [CONTRIBUTING.md](CONTRIBUTING.md) para o fluxo de PRs e issues.
 - **Backend**: Rust (Tauri 2.x) — `src-tauri/`
 - **UI**: SvelteKit — `src/`
 - **Android**: fork do [scrcpy](https://github.com/Genymobile/scrcpy)-server
-  (Java 17, submodule em `scrcpy/`, branch `camlink`)
-- **Runtime**: adb, scrcpy ≥ 4.0, ffmpeg, v4l2loopback ≥ 0.13 (Linux),
+  (Java 17, submodule em `scrcpy/`, branch `camlink-4.1` — rebaseada sobre a
+  tag `v4.1` do upstream, que é a versão do cliente embutido)
+- **Runtime**: adb, ffmpeg, v4l2loopback ≥ 0.13 (Linux), scrcpy embutido,
   filtro DirectShow próprio (Windows — sem driver de terceiros)
 
 ### Compilando do código-fonte
@@ -383,6 +395,18 @@ baixa nada:
 ```bash
 ./installer/linux/vendor.sh --stub
 ```
+
+Para gerar pacote de verdade é preciso também o jar do fork, que exige JDK 17
+e o Android SDK:
+
+```bash
+cd scrcpy && ./build-camlink.sh dist && cd ..
+./installer/linux/vendor.sh          # baixa adb, ffmpeg e o cliente scrcpy
+```
+
+O `vendor.sh` recusa empacotar se o jar e o cliente não forem da mesma
+versão, porque esse par divergente é justamente o que impede qualquer
+celular de conectar.
 
 Gates de qualidade (obrigatórios, ver `.specify/memory/constitution.md`):
 

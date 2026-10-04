@@ -40,7 +40,8 @@ no Android, fora do alcance do Rust); TypeScript/Svelte no frontend Tauri.
 **Primary Dependencies**:
 - Tauri 2.x (shell do app, bundling, IPC frontend↔backend) — **fixa o
   TODO(GUI_FRAMEWORK) da constituição**
-- scrcpy ≥ 4.0 (cliente C, usado apenas no Linux — vídeo via `--v4l2-sink`) +
+- scrcpy na versão exata do fork, embutido no pacote (cliente C, usado
+  apenas no Linux — vídeo via `--v4l2-sink`; T092) +
   fork do `scrcpy-server` (submodule, branch `camlink` sobre a tag do
   cliente; jar stock em US1/T024, jar forkado com socket de controle a
   partir de US2/T037)

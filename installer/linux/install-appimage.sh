@@ -31,6 +31,7 @@ MODPROBE_DST=/etc/modprobe.d/camlink-v4l2loopback.conf
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
+yellow(){ printf '\033[33m%s\033[0m\n' "$*"; }
 
 uninstall() {
   rm -f "$APP_PATH" "$DESKTOP"
@@ -106,6 +107,19 @@ EOF
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 gtk-update-icon-cache -f -t "$ICON_BASE" 2>/dev/null || true
 green "  menu: $DESKTOP"
+
+# --- conferência do que o AppImage deveria trazer ---------------------------
+# adb, ffmpeg e o cliente scrcpy vão DENTRO do AppImage (T066/T092). Se o
+# cliente não estiver lá, o app cai no scrcpy do PATH — que é de outra versão
+# e faz o fork abortar com "The server version (X) does not match the client
+# (Y)" só quando o usuário tenta transmitir, longe daqui. Melhor dizer agora.
+for b in adb ffmpeg scrcpy; do
+  if [[ ! -x "$TMP/squashfs-root/usr/lib/CamLink/bin/$b" ]]; then
+    yellow "  aviso: este AppImage não traz o $b embutido"
+    echo "     O app tentará usar o $b do sistema, que pode não servir."
+    echo "     Baixe o AppImage de novo da release se isso se repetir."
+  fi
+done
 
 # --- pré-requisitos de sistema (só aqui entra o sudo) -----------------------
 need_system=0

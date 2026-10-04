@@ -1,7 +1,8 @@
 {
   "bundle": {
     "resources": {
-      "../installer/linux/vendor/bin/scrcpy-server-camlink": "bin/scrcpy-server-camlink"
+      "../installer/linux/vendor/bin/scrcpy-server-camlink": "bin/scrcpy-server-camlink",
+      "../installer/linux/vendor/bin/scrcpy": "bin/scrcpy"
     },
     "linux": {
       "deb": {
@@ -31,6 +32,7 @@
         "files": {
           "usr/lib/CamLink/bin/adb": "../installer/linux/vendor/bin/adb",
           "usr/lib/CamLink/bin/ffmpeg": "../installer/linux/vendor/bin/ffmpeg",
+          "usr/lib/CamLink/bin/scrcpy": "../installer/linux/vendor/bin/scrcpy",
           "usr/share/camlink/99-camlink-v4l2loopback.rules": "../installer/linux/99-camlink-v4l2loopback.rules",
           "usr/share/camlink/camlink-v4l2loopback.conf": "../installer/linux/camlink-v4l2loopback.conf",
           "usr/share/camlink/modprobe-camlink.conf": "../installer/linux/modprobe-camlink.conf",

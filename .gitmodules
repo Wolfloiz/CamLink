@@ -1,4 +1,8 @@
 [submodule "scrcpy"]
 	path = scrcpy
 	url = https://github.com/Wolfloiz/scrcpy.git
-	branch = camlink
+	# Uma branch por versão do upstream: o fork só funciona com o cliente
+	# scrcpy da MESMA versão, então a tag base faz parte da identidade da
+	# branch. Ao rebasear, crie camlink-<nova versão> e atualize
+	# SCRCPY_PINNED em installer/linux/vendor.sh junto.
+	branch = camlink-4.1
