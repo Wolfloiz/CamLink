@@ -747,7 +747,13 @@ async fn connect_video_socket_with_retry(
 }
 
 #[cfg(target_os = "windows")]
-async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, fps: u32, sink: FrameSink) {
+async fn run_video_pipeline(
+    ffmpeg_path: PathBuf,
+    forward_port: u16,
+    fps: u32,
+    sink: FrameSink,
+    control: Arc<SessionControl>,
+) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let result: Result<(), AppError> = async {
@@ -961,7 +967,24 @@ async fn run_video_pipeline(ffmpeg_path: PathBuf, forward_port: u16, fps: u32, s
                         // Antes esse `while ... .is_ok()` saía em silêncio;
                         // não dava pra saber se o ffmpeg nunca chegou a
                         // produzir nada (0 frames) ou parou no meio.
-                        tracing::warn!(decoded_count, dropped_count, error = %e, "leitura do stdout do ffmpeg encerrada");
+                        //
+                        // Mas WARN em TODO erro também engana: parar a
+                        // transmissão ou trocar de câmera mata o ffmpeg, e o
+                        // `early eof` resultante aparecia como anomalia. No
+                        // log de bancada do Windows (2026-10-06) os três
+                        // `early eof` eram os três cliques do usuário —
+                        // frontal, traseira e parar — e me fizeram caçar um
+                        // bug inexistente num pipeline que entregou 1133
+                        // frames sem descartar nenhum.
+                        if control.is_stop_requested() {
+                            tracing::info!(
+                                decoded_count,
+                                dropped_count,
+                                "pipeline de vídeo encerrado (parada solicitada)"
+                            );
+                        } else {
+                            tracing::warn!(decoded_count, dropped_count, error = %e, "leitura do stdout do ffmpeg encerrada");
+                        }
                         break;
                     }
                 }
@@ -1100,7 +1123,7 @@ async fn maybe_spawn_video_pipeline(
     orientation: (Rotation, bool),
     virtual_camera_target: &str,
     video_sink: Option<&FrameSink>,
-    control: &SessionControl,
+    control: &Arc<SessionControl>,
 ) {
     #[cfg(target_os = "windows")]
     {
@@ -1109,8 +1132,12 @@ async fn maybe_spawn_video_pipeline(
             let ffmpeg_path = paths.ffmpeg.clone();
             let fps = config.fps;
             let sink = Arc::clone(sink);
+            // O pipeline precisa saber se a parada foi PEDIDA: sem isso, o
+            // EOF normal do ffmpeg morto num stop/troca de câmera era
+            // logado como anomalia (ver `run_video_pipeline`).
+            let control_for_pipeline = Arc::clone(control);
             let handle = tokio::spawn(async move {
-                run_video_pipeline(ffmpeg_path, port, fps, sink).await;
+                run_video_pipeline(ffmpeg_path, port, fps, sink, control_for_pipeline).await;
             });
             control.replace_video_pipeline(handle).await;
         }
