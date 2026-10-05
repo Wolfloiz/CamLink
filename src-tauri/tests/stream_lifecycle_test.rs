@@ -365,11 +365,61 @@ async fn scrcpy_client_receives_the_fork_jar_path() {
     let got = std::fs::read_to_string(&dump_path).unwrap_or_default();
     let _ = manager.stop(session_id).await;
 
-    assert_eq!(
-        got,
-        jar.display().to_string(),
+    assert!(
+        got.lines()
+            .any(|l| l == format!("SCRCPY_SERVER_PATH={}", jar.display())),
         "o cliente scrcpy precisa receber SCRCPY_SERVER_PATH apontando para o jar \
          do fork; sem isso ele envia o próprio server e os controles de câmera \
-         quebram com `conexão de controle encerrada pelo servidor`"
+         quebram com `conexão de controle encerrada pelo servidor`. Recebido: {got}"
+    );
+}
+
+/// T095 (bancada 2026-10-04): o cliente scrcpy procura o `adb` DELE ao lado
+/// do próprio binário antes do PATH. Desde que o scrcpy passou a ser
+/// embutido (T092) ele mora em `<recursos>/bin/`, onde o adb não está — no
+/// `.deb` e no Arch o adb vem da distro, e em dev o `tauri-build` copia os
+/// `bundle.resources` para `target/debug/bin/`, que só tem scrcpy e o jar.
+/// Dava `Could not start adb server` seis vezes seguidas, terminando em
+/// "desconecte e reconecte o cabo USB". Só o AppImage escapava, porque leva
+/// os três binários no mesmo diretório.
+#[tokio::test]
+async fn scrcpy_client_receives_the_resolved_adb() {
+    let dump = tempfile::NamedTempFile::new().expect("temp");
+    let dump_path = dump.path().to_path_buf();
+    let jar_file = tempfile::NamedTempFile::new().expect("temp do jar");
+
+    let mut paths = base_paths(vec![(
+        "FAKE_BACKEND_ENV_DUMP".into(),
+        dump_path.display().to_string(),
+    )]);
+    paths.server_jar = Some(jar_file.path().to_path_buf());
+    let expected_adb = paths.adb.clone();
+
+    let manager = StreamManager::new(paths);
+    let session_id = manager
+        .start(
+            SessionSource::Android("R58M12ABCDE".into()),
+            sample_config(),
+            "/dev/video0",
+            None,
+        )
+        .await
+        .expect("start");
+
+    for _ in 0..50 {
+        if std::fs::read_to_string(&dump_path).is_ok_and(|s| !s.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    let got = std::fs::read_to_string(&dump_path).unwrap_or_default();
+    let _ = manager.stop(session_id).await;
+
+    assert!(
+        got.lines()
+            .any(|l| l == format!("ADB={}", expected_adb.display())),
+        "o cliente scrcpy precisa receber ADB apontando para o adb que o CamLink \
+         resolveu; sem isso ele tenta o adb ao lado do próprio binário, que não \
+         existe no .deb nem em dev. Recebido: {got}"
     );
 }

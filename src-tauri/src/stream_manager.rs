@@ -531,6 +531,25 @@ async fn spawn_backend(
         let mut child = Command::new(&paths.scrcpy)
             .args(&args)
             .env("SCRCPY_SERVER_PATH", server_jar)
+            // O cliente scrcpy procura o `adb` DELE ao lado do próprio
+            // binário antes de olhar o PATH. Desde que o scrcpy passou a ser
+            // embutido (T092) ele mora em `<recursos>/bin/`, onde o adb não
+            // está: no `.deb` e no Arch o adb vem da distro (`/usr/bin/adb`),
+            // e em dev o `tauri-build` copia os `bundle.resources` para
+            // `target/debug/bin/`, que só tem scrcpy e o jar. Resultado:
+            //
+            //   exec: No such file or directory
+            //   ERROR: Failed to execute: [<...>/bin/adb], [start-server]
+            //   ERROR: Could not start adb server
+            //
+            // seis vezes, terminando em "desconecte e reconecte o cabo USB"
+            // (bancada 2026-10-04). Só o AppImage escapava, porque leva adb,
+            // ffmpeg e scrcpy no MESMO diretório.
+            //
+            // `ADB` também garante que o cliente e o CamLink usem o MESMO
+            // binário: dois adb diferentes sobem dois servidores adb que
+            // disputam o device.
+            .env("ADB", &paths.adb)
             .envs(paths.extra_env.iter().cloned())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
