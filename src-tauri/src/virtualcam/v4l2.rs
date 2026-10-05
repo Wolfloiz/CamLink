@@ -284,13 +284,22 @@ impl V4l2Backend {
         &self.ffmpeg
     }
 
+    /// Não limpa devices órfãos: construir um backend não deve mexer no
+    /// estado do sistema. Quem faz isso é `new_vcam_backend()` em `lib.rs`,
+    /// com uma chamada explícita a `cleanup_stale()`.
+    ///
+    /// A limpeza morava aqui, e isso significava que QUALQUER construção do
+    /// backend apagava todo device rotulado `CamLink` da máquina — inclusive
+    /// o de um CamLink transmitindo naquele instante. Dois testes de
+    /// `v4l2_test.rs` constroem o backend só para conferir o caminho do
+    /// ffmpeg, então `cargo test` durante uma sessão ativa tentava derrubar
+    /// a câmera virtual viva. Por ser best-effort (EBUSY quando há
+    /// consumidor), o resultado era não determinístico.
     pub fn new(ffmpeg: PathBuf) -> Self {
-        let mut backend = Self {
+        Self {
             cameras: HashMap::new(),
             ffmpeg,
-        };
-        backend.cleanup_stale();
-        backend
+        }
     }
 
     fn spawn_ffmpeg(

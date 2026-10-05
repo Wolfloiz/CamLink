@@ -86,6 +86,17 @@ const CONTROL_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(300);
 /// prefere o binário embutido pelo instalador ao do PATH. Só o backend
 /// Linux o usa — o filtro DirectShow do Windows não spawna ffmpeg.
 fn new_vcam_backend(ffmpeg: PathBuf) -> Box<dyn VirtualCameraBackend + Send> {
+    let mut backend = platform_vcam_backend(ffmpeg);
+    // Explícito, e só aqui: na inicialização do app nenhuma sessão existe
+    // ainda, então é seguro remover o que uma execução anterior deixou
+    // (crash ou SIGKILL, que nenhum processo consegue interceptar). Estava
+    // no construtor do backend, onde pegava também a câmera de um CamLink
+    // em pleno uso — ver doc de `V4l2Backend::new`. No Windows é no-op.
+    backend.cleanup_stale();
+    backend
+}
+
+fn platform_vcam_backend(ffmpeg: PathBuf) -> Box<dyn VirtualCameraBackend + Send> {
     #[cfg(target_os = "linux")]
     {
         Box::new(V4l2Backend::new(ffmpeg))

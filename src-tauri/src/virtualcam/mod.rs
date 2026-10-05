@@ -219,7 +219,9 @@ pub trait VirtualCameraBackend {
     /// Colapsa devices duplicados (mesmo label) deixados por sessões
     /// anteriores que não puderam ser removidos na hora (estavam ocupados
     /// por um consumidor) de volta a no máximo um por label. Chamado uma
-    /// vez na construção do backend — nesse momento nenhuma sessão do
+    /// vez por `new_vcam_backend()` na inicialização do app — e NÃO pelo
+    /// construtor do backend, que não deve ter efeito sobre o sistema (ver
+    /// doc de `V4l2Backend::new`). Nesse momento nenhuma sessão do
     /// CamLink está rodando ainda, então é o ponto mais seguro/eficaz pra
     /// arrumar o que ficou pra trás sem depender de outro restart
     /// acontecer (achado em bancada 2026-07-27: sem isso, o Meet/OBS podia
