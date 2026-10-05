@@ -36,10 +36,24 @@ use crate::model::{
 /// do cliente scrcpy real — `SC_DEVICE_SERVER_PATH` em `server.c`).
 pub const SCRCPY_DEVICE_SERVER_PATH: &str = "/data/local/tmp/scrcpy-server.jar";
 
-/// Precisa acompanhar a tag do submodule `scrcpy/` (fixada em R1) — cliente
-/// e servidor devem casar de versão; o protocolo de bootstrap do servidor é
-/// "interno" e pode mudar entre releases (scrcpy/doc/develop.md).
-pub const SCRCPY_VERSION: &str = "4.0";
+/// Versão que o CamLink declara ao servidor no Windows, onde ELE é o
+/// cliente (o Linux delega ao binário do scrcpy, que declara a própria).
+///
+/// Tem que ser EXATAMENTE a versão do jar do fork. O `Options.parse` do
+/// servidor compara `args[0]` com o `BuildConfig.VERSION_NAME` dele e lança
+/// `IllegalArgumentException` se diferirem — o processo morre no bootstrap,
+/// antes de abrir qualquer socket.
+///
+/// Ficou em "4.0" depois do rebase do fork para a v4.1 (T092), e isso
+/// quebrou SÓ o Windows: o servidor morria na hora, o vídeo nunca conectava
+/// (6 reconexões → "desconecte e reconecte o cabo USB") e o servidor de
+/// controle nunca subia ("conexão de controle encerrada pelo servidor").
+/// No Linux passou despercebido porque lá esta constante não é usada.
+///
+/// `scrcpy_version_matches_the_pinned_client` (stream_lifecycle_test) amarra
+/// isto ao `SCRCPY_PINNED` do `installer/linux/vendor.sh`, que é a fonte
+/// única da versão — não deixe os dois divergirem à mão.
+pub const SCRCPY_VERSION: &str = "4.1";
 
 const RETRY_BACKOFF: Duration = Duration::from_millis(200);
 const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(3);

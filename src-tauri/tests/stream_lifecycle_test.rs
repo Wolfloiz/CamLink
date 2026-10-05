@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use camlink_lib::model::{SessionSource, SessionState, StreamConfig, VideoCodec};
 use camlink_lib::stream_manager::{
-    classify_stderr, require_server_jar, ExternalPaths, StreamManager,
+    classify_stderr, require_server_jar, ExternalPaths, StreamManager, SCRCPY_VERSION,
 };
 
 fn fake_backend_path() -> PathBuf {
@@ -422,5 +422,46 @@ async fn scrcpy_client_receives_the_resolved_adb() {
         "o cliente scrcpy precisa receber ADB apontando para o adb que o CamLink \
          resolveu; sem isso ele tenta o adb ao lado do próprio binário, que não \
          existe no .deb nem em dev. Recebido: {got}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T097 — a versão declarada ao servidor TEM que ser a do jar
+//
+// No Windows o CamLink é o cliente: ele passa `SCRCPY_VERSION` como
+// `args[0]` do `com.genymobile.scrcpy.Server`, e o `Options.parse` do
+// servidor lança `IllegalArgumentException` se não bater com o
+// `BuildConfig.VERSION_NAME` dele. O processo morre antes de abrir socket.
+//
+// Depois do rebase do fork para a v4.1 (T092) a constante ficou em "4.0" e
+// quebrou só o Windows — no Linux ela não é usada, porque lá quem declara a
+// versão é o binário do scrcpy. Foi a terceira vez nesta feature que versão
+// desencontrada passou por todos os gates, então a checagem deixou de ser
+// humana: este teste lê o `SCRCPY_PINNED` do vendor.sh, que é a fonte única
+// da versão (o mesmo valor que o guard de empacotamento compara com o
+// `versionName` do fork e com o dex do jar).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scrcpy_version_matches_the_pinned_client() {
+    // O vendor.sh vive no repositório principal (não no submodule), então
+    // está presente mesmo no checkout sem submodules que o CI usa.
+    let vendor_sh =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../installer/linux/vendor.sh");
+    let script = std::fs::read_to_string(&vendor_sh)
+        .unwrap_or_else(|e| panic!("não consegui ler {}: {e}", vendor_sh.display()));
+
+    let pinned = script
+        .lines()
+        .find_map(|l| l.strip_prefix("SCRCPY_PINNED="))
+        .map(|v| v.trim().trim_matches('"').trim_start_matches('v'))
+        .expect("SCRCPY_PINNED não encontrado no vendor.sh");
+
+    assert_eq!(
+        SCRCPY_VERSION, pinned,
+        "SCRCPY_VERSION ({SCRCPY_VERSION}) difere do SCRCPY_PINNED do vendor.sh ({pinned}). \
+         No Windows isso mata o servidor no bootstrap com `The server version (X) does not \
+         match the client (Y)`: sem vídeo e sem controles. Ao rebasear o fork, atualize os \
+         dois — e o `versionName` do scrcpy/server/build.gradle."
     );
 }
