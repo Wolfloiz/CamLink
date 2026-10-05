@@ -288,7 +288,6 @@ fn classify_stderr_ignores_unknown_lines() {
 // Relatado em bancada com o AppImage (2026-10-03).
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "linux")]
 /// T094 (bancada 2026-10-04, `cargo tauri dev`): sem jar do fork resolvido,
 /// a sessão só morria e o supervisor reconectava 6 vezes, terminando em
 /// "desconecte e reconecte o cabo USB" — culpando o cabo por um jar que
@@ -327,6 +326,7 @@ async fn jar_do_fork_configurado_mas_ausente_tambem_e_acionavel() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn scrcpy_client_receives_the_fork_jar_path() {
     let dump = tempfile::NamedTempFile::new().expect("temp");
@@ -382,6 +382,7 @@ async fn scrcpy_client_receives_the_fork_jar_path() {
 /// Dava `Could not start adb server` seis vezes seguidas, terminando em
 /// "desconecte e reconecte o cabo USB". Só o AppImage escapava, porque leva
 /// os três binários no mesmo diretório.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn scrcpy_client_receives_the_resolved_adb() {
     let dump = tempfile::NamedTempFile::new().expect("temp");
