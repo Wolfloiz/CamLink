@@ -54,7 +54,7 @@ async fn spawn_fake_server(hello: &'static str, script: Vec<Vec<&'static str>>) 
     port
 }
 
-const HELLO_OK: &str = r#"{"ok":true,"protocol":1,"server":"camlink-v4.0"}"#;
+const HELLO_OK: &str = r#"{"ok":true,"protocol":1,"server":"camlink-vTEST"}"#;
 
 #[tokio::test]
 async fn handshake_and_zoom_roundtrip() {
