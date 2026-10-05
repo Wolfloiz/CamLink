@@ -96,7 +96,23 @@ Com stream ativo no OBS:
 
 ## Cenário 7 — Sessão longa e instalação (SC-005, SC-008, SC-010)
 
-1. Stream de 2 h → sem interrupção perceptível; RSS do processo estável.
+1. **Stream de 2 h** → sem interrupção perceptível; RSS estável.
+
+   Abra o app, inicie UMA fonte, deixe transmitindo e então:
+
+   ```bash
+   ./scripts/soak.sh          # 2 h; use ./scripts/soak.sh 600 para ensaiar o roteiro
+   ```
+
+   O script amostra o RSS do processo **e dos descendentes** (scrcpy e
+   ffmpeg fazem o trabalho pesado — um vazamento neles não apareceria no RSS
+   do app sozinho), grava um CSV e no fim cruza com o log do app para
+   reportar fps mínimo/máximo, número de reconexões e quantos WARN/ERROR
+   apareceram. Ele não inicia nada: só observa, para não interferir no que
+   mede.
+
+   Critério de reprovação: RSS crescendo mais de 15% do início ao fim,
+   qualquer reconexão, ou o processo morrer no meio.
 2. Instalação limpa: Ubuntu 22.04/24.04 e Arch via pacotes; Windows 10 e 11
    via instalador → primeiro vídeo funcionando **sem abrir terminal** (SC-008).
 3. Repetir Cenário 1 completo no Windows → resultados equivalentes (SC-010).
