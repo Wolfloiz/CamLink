@@ -22,7 +22,7 @@ pub mod secrets;
 pub mod stream_manager;
 pub mod virtualcam;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -108,22 +108,6 @@ fn new_vcam_backend(ffmpeg: PathBuf) -> Box<dyn VirtualCameraBackend + Send> {
 /// convenção que o cliente real usa para o path default do servidor
 /// (`SC_SERVER_PATH_DEFAULT`, relativo ao próprio binário), só que via
 /// busca no PATH em vez de relativo ao instalador do CamLink.
-fn find_server_jar_next_to_scrcpy_binary() -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    let binary_name = if cfg!(windows) {
-        "scrcpy.exe"
-    } else {
-        "scrcpy"
-    };
-    std::env::split_paths(&path_var).find_map(|dir| {
-        if !dir.join(binary_name).is_file() {
-            return None;
-        }
-        let candidate = dir.join("scrcpy-server");
-        candidate.is_file().then_some(candidate)
-    })
-}
-
 // Diretório onde o instalador coloca os binários vendorizados
 // (`bundle.resources`): `<exe>\bin\` no Windows (T067),
 // `/usr/lib/CamLink/bin/` no `.deb` e `$APPDIR/usr/lib/CamLink/bin/` no
@@ -170,12 +154,23 @@ fn bundled_path(name: &str) -> Option<PathBuf> {
 /// procurado ao lado do binário `scrcpy` no PATH → `scrcpy-server` no
 /// diretório de trabalho como último recurso.
 fn resolve_external_paths() -> ExternalPaths {
+    // Só duas origens são válidas, e nenhuma delas é "o scrcpy-server que
+    // estiver por aí": o jar TEM que ser o do fork, senão o
+    // `CamLinkControlServer` não existe e os controles morrem em silêncio —
+    // que é exatamente o T091. Havia aqui um terceiro passo procurando
+    // `scrcpy-server` ao lado do binário no PATH; ele resolveria o jar
+    // OFICIAL do scrcpy e recriaria aquele bug, então saiu.
+    //
+    // `None` em vez de um `PathBuf::from("scrcpy-server")` de mentira: o
+    // placeholder relativo não existia em disco e, desde que o T091 passou
+    // a exportar `SCRCPY_SERVER_PATH` para o filho, ele virou autoritativo
+    // e quebrou o `cargo tauri dev` com 6 reconexões e uma mensagem
+    // culpando o cabo USB (bancada 2026-10-04). Quem não consegue resolver
+    // o jar precisa falhar dizendo isso.
     let server_jar = std::env::var("SCRCPY_SERVER_PATH")
         .ok()
         .map(PathBuf::from)
-        .or_else(|| bundled_file("scrcpy-server-camlink"))
-        .or_else(find_server_jar_next_to_scrcpy_binary)
-        .unwrap_or_else(|| PathBuf::from("scrcpy-server"));
+        .or_else(|| bundled_file("scrcpy-server-camlink"));
     ExternalPaths {
         adb: bundled_path("adb").unwrap_or_else(|| PathBuf::from("adb")),
         scrcpy: bundled_path("scrcpy").unwrap_or_else(|| PathBuf::from("scrcpy")),
@@ -291,6 +286,21 @@ struct AppState {
     /// trocas em hardware, 2026-07-24) — o lock garante que cada restart
     /// termina (stop + spawn) antes do próximo começar.
     restart_locks: TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>,
+    /// `session_id`s que estão sendo SUBSTITUÍDOS por um restart
+    /// (`switch_camera`/rotação), e não encerrados pelo usuário.
+    ///
+    /// O emissor de `session_state` manda um último evento com
+    /// `state: idle` quando a sessão morre, e o frontend trata `idle` como
+    /// "a fonte acabou": apaga o card e colapsa o painel. Num restart isso
+    /// é falso — a fonte continua lá, só com `session_id` novo — e o card
+    /// desaparecia debaixo do usuário no meio da troca de câmera.
+    ///
+    /// A marca é posta ANTES do `stop()` porque a correção precisa ser
+    /// determinística: `stop()` só retorna depois do estado virar `Idle`, e
+    /// a partir daí o monitor pode emitir a qualquer momento dentro do
+    /// próximo tick. Tentar "remover a sessão rápido depois do stop" deixa
+    /// essa janela aberta.
+    replaced_sessions: TokioMutex<HashSet<Uuid>>,
 }
 
 /// Conta fontes ativas nos dois registries (Android + RTSP) para o gate de
@@ -1152,6 +1162,9 @@ async fn restart_android_session(
     let lock = restart_lock_for(state, &serial).await;
     let _restart_guard = lock.lock().await;
 
+    // Antes do stop, não depois: ver doc de `AppState::replaced_sessions`.
+    state.replaced_sessions.lock().await.insert(old_session_id);
+
     state.stream_manager.stop(old_session_id).await?;
     if let Some(mut old_ctx) = state.sessions.lock().await.remove(&old_session_id) {
         release_control_forward(&mut old_ctx).await;
@@ -1797,6 +1810,25 @@ fn spawn_preview_encoder(
     })
 }
 
+/// Decide se o `idle` de uma sessão deve ser anunciado ao frontend, e
+/// consome a marca de substituição no caminho.
+///
+/// `false` só para sessão substituída por restart (`switch_camera`/rotação):
+/// ali `idle` significa "trocou de `session_id`", não "a fonte acabou", e o
+/// frontend apaga o card ao ouvir `idle`. Ver `AppState::replaced_sessions`.
+///
+/// A rotação 90°/270° sofria do mesmo problema, mais silenciosamente: o
+/// `idle` apagava a fonte e o `session_replaced` que vinha depois não
+/// achava mais o índice, então o card desaparecia com o stream vivo por
+/// baixo. O conserto aqui cobre os dois porque `restart_android_session` é
+/// compartilhado.
+///
+/// A marca é consumida (one-shot) para o `HashSet` não crescer sem limite ao
+/// longo de uma sessão com muitas trocas de câmera.
+async fn should_announce_idle(replaced: &TokioMutex<HashSet<Uuid>>, session_id: Uuid) -> bool {
+    !replaced.lock().await.remove(&session_id)
+}
+
 /// Emite `session_state` a cada tick (`SESSION_STATE_POLL_INTERVAL`) até a
 /// sessão voltar a `Idle` (FR-010) — inclui fps/reconnects atualizados, que
 /// mudam sem necessariamente trocar de `SessionState`. Cada `start_stream`
@@ -1817,6 +1849,10 @@ fn spawn_session_state_emitter(
                 state.stream_manager.session(session_id).await
             };
             let Some(mut session) = session else {
+                // Sessão já saiu do registry: nada a reportar, e a marca de
+                // substituição (se houver) não serve mais pra ninguém.
+                let state = app.state::<AppState>();
+                state.replaced_sessions.lock().await.remove(&session_id);
                 break;
             };
 
@@ -1845,6 +1881,26 @@ fn spawn_session_state_emitter(
             // de SessionState nenhuma — só emitir "toda transição" (leitura
             // literal do contrato) deixava o fps aparecer travado no
             // frontend o tempo todo.
+            if session.state == SessionState::Idle {
+                // `idle` de uma sessão SUBSTITUÍDA não pode ser anunciado: o
+                // frontend leria como "a fonte acabou" e apagaria o card no
+                // meio do restart (achado em bancada 2026-10-04, clicando em
+                // Frontal/Traseira). Quem informa a troca ao frontend é o
+                // retorno do próprio comando (`switch_camera`) ou o evento
+                // `session_replaced` (rotação) — nunca este `idle`.
+                let announce = {
+                    let state = app.state::<AppState>();
+                    // Ligado a um local antes de fechar o bloco: o guard do
+                    // mutex é um temporário da expressão final e seria
+                    // dropado DEPOIS de `state`, que ele empresta (E0597).
+                    let ok = should_announce_idle(&state.replaced_sessions, session_id).await;
+                    ok
+                };
+                if !announce {
+                    break;
+                }
+            }
+
             let payload = SessionStateEvent {
                 session_id,
                 state: session.state.clone(),
@@ -1970,7 +2026,11 @@ pub fn run() {
         adb = %external.adb.display(),
         scrcpy = %external.scrcpy.display(),
         ffmpeg = %external.ffmpeg.display(),
-        server_jar = %external.server_jar.display(),
+        server_jar = external
+            .server_jar
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<não resolvido>".to_string()),
         "binários externos resolvidos"
     );
     // Achado ao validar o instalador Linux (T066): o polling de dispositivos
@@ -2004,6 +2064,7 @@ pub fn run() {
         sessions: TokioMutex::new(HashMap::new()),
         rtsp: rtsp_sessions,
         restart_locks: TokioMutex::new(HashMap::new()),
+        replaced_sessions: TokioMutex::new(HashSet::new()),
     };
 
     tauri::Builder::default()
@@ -2058,6 +2119,45 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T093 (bancada 2026-10-04): clicar em Frontal/Traseira derrubava o
+    /// card da fonte e estourava `TypeError: null is not an object` no
+    /// frontend. O restart para a sessão antiga, o emissor mandava um último
+    /// `session_state` com `idle`, e o frontend trata `idle` como "a fonte
+    /// acabou" — apagava a fonte e colapsava o painel no meio da troca.
+    #[tokio::test]
+    async fn idle_de_sessao_substituida_nao_e_anunciado() {
+        let replaced = TokioMutex::new(HashSet::new());
+        let trocando = Uuid::new_v4();
+        let parando = Uuid::new_v4();
+
+        // Marca posta pelo restart ANTES do stop (ver restart_android_session).
+        replaced.lock().await.insert(trocando);
+
+        assert!(
+            !should_announce_idle(&replaced, trocando).await,
+            "idle de sessão substituída por restart não pode ser anunciado"
+        );
+        assert!(
+            should_announce_idle(&replaced, parando).await,
+            "idle de sessão encerrada de verdade continua sendo anunciado"
+        );
+    }
+
+    /// A marca é one-shot: sem consumir, o `HashSet` cresceria a cada troca
+    /// de câmera durante toda a vida do app.
+    #[tokio::test]
+    async fn marca_de_substituicao_e_consumida() {
+        let replaced = TokioMutex::new(HashSet::new());
+        let id = Uuid::new_v4();
+        replaced.lock().await.insert(id);
+
+        assert!(!should_announce_idle(&replaced, id).await);
+        assert!(
+            replaced.lock().await.is_empty(),
+            "a marca tem que sair do set depois de usada"
+        );
+    }
 
     /// T1.3 (FR-023): o encode de preview roda numa task própria alimentada
     /// por um canal `watch` (sempre o frame mais recente, sem fila) — o loop

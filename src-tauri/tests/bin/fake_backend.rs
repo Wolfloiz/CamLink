@@ -45,9 +45,18 @@ fn main() -> ExitCode {
     // Usado pelo teste que garante o SCRCPY_SERVER_PATH chegando ao cliente
     // scrcpy — sem ele o scrcpy envia o server dele ao celular, não o nosso
     // fork, e todo controle de câmera falha.
+    // Despeja as variáveis que o CamLink precisa repassar ao cliente
+    // scrcpy, uma por linha em `CHAVE=valor`. Eram duas regressões reais:
+    // `SCRCPY_SERVER_PATH` (T091 — o jar do fork nunca chegava ao celular) e
+    // `ADB` (T095 — o scrcpy embutido procurava o adb ao lado de si mesmo,
+    // onde ele não está no .deb nem em dev).
     if let Ok(path) = env::var("FAKE_BACKEND_ENV_DUMP") {
-        let got = env::var("SCRCPY_SERVER_PATH").unwrap_or_default();
-        let _ = std::fs::write(path, got);
+        let dump = ["SCRCPY_SERVER_PATH", "ADB"]
+            .iter()
+            .map(|key| format!("{key}={}", env::var(key).unwrap_or_default()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = std::fs::write(path, dump);
     }
 
     let mode = env::var("FAKE_BACKEND_MODE").unwrap_or_else(|_| "stay_alive".to_string());

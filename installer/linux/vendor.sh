@@ -153,7 +153,15 @@ assert_jar_matches_pin() { # $1 = caminho do jar
   # Byte de tamanho de verdade, e não o texto "\x03": o printf de fora
   # precisa receber a sequência já montada pelo de dentro.
   prefix="$(printf "\\x$(printf '%02x' "$len")")"
-  if ! unzip -p "$1" classes.dex 2>/dev/null | grep -aqF "$prefix$want"; then
+  # `grep -c` e comparação do NÚMERO, não `grep -q` + status do pipe: o
+  # `-q` sai no primeiro match e mata o `unzip` com SIGPIPE (141), que o
+  # `set -o pipefail` do topo propaga — o `if !` então concluía "não é a
+  # versão certa" para QUALQUER jar, inclusive o correto. É o mesmo bug que
+  # o `install.sh` tinha na checagem do módulo v4l2loopback; `-c` consome a
+  # entrada toda, então o produtor termina normalmente.
+  local matches
+  matches="$(unzip -p "$1" classes.dex 2>/dev/null | grep -acF "$prefix$want" || true)"
+  if [[ "${matches:-0}" -eq 0 ]]; then
     echo "O jar em scrcpy/dist/ não é da versão $want." >&2
     echo "Rode scrcpy/build-camlink.sh depois do rebase (precisa de JDK 17 + Android SDK)." >&2
     exit 1

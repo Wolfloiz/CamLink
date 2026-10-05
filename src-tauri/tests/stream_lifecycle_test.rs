@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use camlink_lib::model::{SessionSource, SessionState, StreamConfig, VideoCodec};
-use camlink_lib::stream_manager::{classify_stderr, ExternalPaths, StreamManager};
+use camlink_lib::stream_manager::{
+    classify_stderr, require_server_jar, ExternalPaths, StreamManager,
+};
 
 fn fake_backend_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake_backend"))
@@ -21,7 +23,12 @@ fn base_paths(extra_env: Vec<(String, String)>) -> ExternalPaths {
         adb: fake.clone(),
         scrcpy: fake,
         ffmpeg: PathBuf::from("ffmpeg"),
-        server_jar: PathBuf::from("scrcpy-server.jar"),
+        // Precisa ser um arquivo que EXISTE: `require_server_jar` valida
+        // isso antes de spawnar, porque um jar configurado mas ausente
+        // (pacote incompleto, SCRCPY_SERVER_PATH obsoleto) terminava em 6
+        // reconexões culpando o cabo USB. O fake_backend serve de stand-in:
+        // nada aqui o lê como jar de verdade.
+        server_jar: Some(fake_backend_path()),
         extra_env,
     }
 }
@@ -281,18 +288,61 @@ fn classify_stderr_ignores_unknown_lines() {
 // Relatado em bancada com o AppImage (2026-10-03).
 // ---------------------------------------------------------------------------
 
+/// T094 (bancada 2026-10-04, `cargo tauri dev`): sem jar do fork resolvido,
+/// a sessão só morria e o supervisor reconectava 6 vezes, terminando em
+/// "desconecte e reconecte o cabo USB" — culpando o cabo por um jar que
+/// nunca existiu. A causa era o `PathBuf::from("scrcpy-server")` de
+/// placeholder, que o T091 tornou autoritativo ao exportá-lo para o filho.
+#[tokio::test]
+async fn sem_jar_do_fork_o_erro_e_acionavel_e_nao_reconexao() {
+    let mut paths = base_paths(Vec::new());
+    paths.server_jar = None;
+
+    let err =
+        require_server_jar(&paths).expect_err("sem jar resolvido tem que ser erro, não tentativa");
+
+    assert_eq!(err.code, "scrcpy_server_jar_ausente");
+    assert!(
+        err.action_hint.is_some(),
+        "o erro precisa dizer o que fazer, não só que falhou"
+    );
+}
+
+/// Jar configurado mas ausente em disco (pacote incompleto,
+/// `SCRCPY_SERVER_PATH` apontando pra um build apagado) cai no mesmo erro
+/// acionável — era o outro caminho para as 6 reconexões.
+#[tokio::test]
+async fn jar_do_fork_configurado_mas_ausente_tambem_e_acionavel() {
+    let mut paths = base_paths(Vec::new());
+    paths.server_jar = Some(PathBuf::from("/tmp/camlink-jar-que-nao-existe"));
+
+    let err = require_server_jar(&paths).expect_err("jar ausente em disco tem que ser erro");
+
+    assert_eq!(err.code, "scrcpy_server_jar_ausente");
+    assert!(
+        err.msg.contains("camlink-jar-que-nao-existe"),
+        "a mensagem deve dizer QUAL caminho faltou, senão não ajuda a corrigir: {}",
+        err.msg
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn scrcpy_client_receives_the_fork_jar_path() {
     let dump = tempfile::NamedTempFile::new().expect("temp");
     let dump_path = dump.path().to_path_buf();
 
-    let jar = PathBuf::from("/usr/lib/CamLink/bin/scrcpy-server-camlink");
+    // Arquivo real, e não um caminho simbólico tipo
+    // `/usr/lib/CamLink/bin/scrcpy-server-camlink`: aquele não existe na
+    // máquina de quem roda os testes, e o teste só passava porque nada
+    // checava existência. `require_server_jar` agora checa.
+    let jar_file = tempfile::NamedTempFile::new().expect("temp do jar");
+    let jar = jar_file.path().to_path_buf();
     let mut paths = base_paths(vec![(
         "FAKE_BACKEND_ENV_DUMP".into(),
         dump_path.display().to_string(),
     )]);
-    paths.server_jar = jar.clone();
+    paths.server_jar = Some(jar.clone());
 
     let manager = StreamManager::new(paths);
     let session_id = manager
@@ -315,11 +365,62 @@ async fn scrcpy_client_receives_the_fork_jar_path() {
     let got = std::fs::read_to_string(&dump_path).unwrap_or_default();
     let _ = manager.stop(session_id).await;
 
-    assert_eq!(
-        got,
-        jar.display().to_string(),
+    assert!(
+        got.lines()
+            .any(|l| l == format!("SCRCPY_SERVER_PATH={}", jar.display())),
         "o cliente scrcpy precisa receber SCRCPY_SERVER_PATH apontando para o jar \
          do fork; sem isso ele envia o próprio server e os controles de câmera \
-         quebram com `conexão de controle encerrada pelo servidor`"
+         quebram com `conexão de controle encerrada pelo servidor`. Recebido: {got}"
+    );
+}
+
+/// T095 (bancada 2026-10-04): o cliente scrcpy procura o `adb` DELE ao lado
+/// do próprio binário antes do PATH. Desde que o scrcpy passou a ser
+/// embutido (T092) ele mora em `<recursos>/bin/`, onde o adb não está — no
+/// `.deb` e no Arch o adb vem da distro, e em dev o `tauri-build` copia os
+/// `bundle.resources` para `target/debug/bin/`, que só tem scrcpy e o jar.
+/// Dava `Could not start adb server` seis vezes seguidas, terminando em
+/// "desconecte e reconecte o cabo USB". Só o AppImage escapava, porque leva
+/// os três binários no mesmo diretório.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn scrcpy_client_receives_the_resolved_adb() {
+    let dump = tempfile::NamedTempFile::new().expect("temp");
+    let dump_path = dump.path().to_path_buf();
+    let jar_file = tempfile::NamedTempFile::new().expect("temp do jar");
+
+    let mut paths = base_paths(vec![(
+        "FAKE_BACKEND_ENV_DUMP".into(),
+        dump_path.display().to_string(),
+    )]);
+    paths.server_jar = Some(jar_file.path().to_path_buf());
+    let expected_adb = paths.adb.clone();
+
+    let manager = StreamManager::new(paths);
+    let session_id = manager
+        .start(
+            SessionSource::Android("R58M12ABCDE".into()),
+            sample_config(),
+            "/dev/video0",
+            None,
+        )
+        .await
+        .expect("start");
+
+    for _ in 0..50 {
+        if std::fs::read_to_string(&dump_path).is_ok_and(|s| !s.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    let got = std::fs::read_to_string(&dump_path).unwrap_or_default();
+    let _ = manager.stop(session_id).await;
+
+    assert!(
+        got.lines()
+            .any(|l| l == format!("ADB={}", expected_adb.display())),
+        "o cliente scrcpy precisa receber ADB apontando para o adb que o CamLink \
+         resolveu; sem isso ele tenta o adb ao lado do próprio binário, que não \
+         existe no .deb nem em dev. Recebido: {got}"
     );
 }

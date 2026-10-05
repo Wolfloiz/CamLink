@@ -15,7 +15,7 @@
 //! entra em T037/US2.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -129,7 +129,10 @@ pub struct ExternalPaths {
     pub adb: PathBuf,
     pub scrcpy: PathBuf,
     pub ffmpeg: PathBuf,
-    pub server_jar: PathBuf,
+    /// Jar do fork (`scrcpy-server-camlink`). `None` quando não foi
+    /// possível resolvê-lo — ver `resolve_external_paths` em `lib.rs`.
+    /// Iniciar sessão Android sem ele é erro acionável, não tentativa.
+    pub server_jar: Option<PathBuf>,
     /// Variáveis de ambiente extras aplicadas a todo subprocesso spawnado
     /// por este módulo. Em produção fica vazio; testes usam para controlar
     /// o comportamento do binário fake (`fake_backend`).
@@ -406,6 +409,32 @@ pub fn parse_forward_port(stdout: &str) -> Option<u16> {
 // os frames sozinho via `--v4l2-sink`).
 // ---------------------------------------------------------------------------
 
+/// Sessão Android exige o jar do fork nas DUAS plataformas: no Linux o
+/// cliente scrcpy o envia ao aparelho (`SCRCPY_SERVER_PATH`), no Windows o
+/// `adb push` o coloca lá. Sem ele não há o que tentar.
+///
+/// Erro acionável em vez de deixar o spawn falhar: sem isto a sessão só
+/// morria, o supervisor reconectava 6 vezes e o usuário recebia
+/// "desconecte e reconecte o cabo USB" — culpando o cabo por um jar que
+/// nunca existiu (bancada 2026-10-04, em `cargo tauri dev`).
+pub fn require_server_jar(paths: &ExternalPaths) -> Result<&Path, AppError> {
+    match paths.server_jar.as_deref() {
+        Some(jar) if jar.is_file() => Ok(jar),
+        Some(jar) => Err(AppError::new(
+            "scrcpy_server_jar_ausente",
+            format!("O servidor do CamLink não existe em {}", jar.display()),
+        )
+        .with_hint(SERVER_JAR_HINT)),
+        None => Err(AppError::new(
+            "scrcpy_server_jar_ausente",
+            "O servidor do CamLink (jar do fork) não foi encontrado",
+        )
+        .with_hint(SERVER_JAR_HINT)),
+    }
+}
+
+const SERVER_JAR_HINT: &str = "Num CamLink instalado isso indica pacote incompleto — reinstale.      Em desenvolvimento, construa o jar com `scrcpy/build-camlink.sh dist`      (precisa de JDK 17 + Android SDK) e exporte      SCRCPY_SERVER_PATH apontando para ele. O `scrcpy-server` oficial da      distribuição NÃO serve: ele não traz o servidor de controle do CamLink.";
+
 async fn spawn_backend(
     paths: &ExternalPaths,
     config: &StreamConfig,
@@ -414,6 +443,11 @@ async fn spawn_backend(
     orientation: (Rotation, bool),
     serial: &str,
 ) -> Result<(Child, Option<u16>), AppError> {
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "windows")),
+        allow(unused_variables)
+    )]
+    let server_jar = require_server_jar(paths)?;
     #[cfg(target_os = "linux")]
     {
         let _ = session_id;
@@ -496,7 +530,26 @@ async fn spawn_backend(
         // variável por ali quando precisam.
         let mut child = Command::new(&paths.scrcpy)
             .args(&args)
-            .env("SCRCPY_SERVER_PATH", &paths.server_jar)
+            .env("SCRCPY_SERVER_PATH", server_jar)
+            // O cliente scrcpy procura o `adb` DELE ao lado do próprio
+            // binário antes de olhar o PATH. Desde que o scrcpy passou a ser
+            // embutido (T092) ele mora em `<recursos>/bin/`, onde o adb não
+            // está: no `.deb` e no Arch o adb vem da distro (`/usr/bin/adb`),
+            // e em dev o `tauri-build` copia os `bundle.resources` para
+            // `target/debug/bin/`, que só tem scrcpy e o jar. Resultado:
+            //
+            //   exec: No such file or directory
+            //   ERROR: Failed to execute: [<...>/bin/adb], [start-server]
+            //   ERROR: Could not start adb server
+            //
+            // seis vezes, terminando em "desconecte e reconecte o cabo USB"
+            // (bancada 2026-10-04). Só o AppImage escapava, porque leva adb,
+            // ffmpeg e scrcpy no MESMO diretório.
+            //
+            // `ADB` também garante que o cliente e o CamLink usem o MESMO
+            // binário: dois adb diferentes sobem dois servidores adb que
+            // disputam o device.
+            .env("ADB", &paths.adb)
             .envs(paths.extra_env.iter().cloned())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -524,7 +577,7 @@ async fn spawn_backend(
         // sink, ver lib.rs) — o servidor roda sem transform pra permitir
         // mirror/180° ao vivo, sem restart (FR-016a/SC-004).
         let _ = (virtual_camera_target, orientation);
-        bootstrap_windows_server(paths, config, session_id, serial).await
+        bootstrap_windows_server(paths, server_jar, config, session_id, serial).await
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
@@ -544,15 +597,19 @@ async fn spawn_backend(
 }
 
 #[cfg(target_os = "windows")]
+/// `server_jar` já vem validado por `require_server_jar`, chamado em
+/// `spawn_backend` antes do split de plataforma para as duas terem o mesmo
+/// erro acionável (Princípio IV).
 async fn bootstrap_windows_server(
     paths: &ExternalPaths,
+    server_jar: &Path,
     config: &StreamConfig,
     session_id: Uuid,
     serial: &str,
 ) -> Result<(Child, Option<u16>), AppError> {
     let push_status = crate::procutil::hide_console(Command::new(&paths.adb))
         .args(["-s", serial, "push"])
-        .arg(&paths.server_jar)
+        .arg(server_jar)
         .arg(SCRCPY_DEVICE_SERVER_PATH)
         .envs(paths.extra_env.iter().cloned())
         .status()

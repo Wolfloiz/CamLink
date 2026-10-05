@@ -433,6 +433,18 @@
       </div>
 
       {#if expandedSource}
+        <!--
+          O `id` é capturado AQUI, no render, e não lido dentro do callback.
+          `expandedSource` é um `$derived`, então um callback que o lesse na
+          hora de executar leria o valor do MOMENTO DA RESPOSTA — e um
+          restart pode ter colapsado o painel nesse meio-tempo, deixando-o
+          null. Era o `expandedSource!.id` de antes: o `!` é só do
+          TypeScript, apaga na compilação e não protege nada em runtime
+          (`TypeError: null is not an object`, bancada 2026-10-04).
+          Capturar no render também é a semântica certa: o restart pertence
+          à fonte que estava aberta quando o usuário clicou.
+        -->
+        {@const expandedSourceId = expandedSource.id}
         <div class="card expanded-card">
           <div class="expanded-header">
             <button type="button" class="back-link" onclick={() => (expandedId = null)}>
@@ -475,7 +487,7 @@
                 sessionId={expandedSource.sessionId}
                 serial={expandedSource.serial}
                 mode={expandedSource.controlState?.mode ?? "auto"}
-                onSessionChanged={(response) => adoptSession(expandedSource!.id, response)}
+                onSessionChanged={(response) => adoptSession(expandedSourceId, response)}
                 onError={applyError}
               />
             </div>
