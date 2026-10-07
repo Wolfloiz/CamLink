@@ -1840,6 +1840,12 @@ async fn should_announce_idle(replaced: &TokioMutex<HashSet<Uuid>>, session_id: 
     !replaced.lock().await.remove(&session_id)
 }
 
+/// De quantos em quantos ticks do emissor as stats vão para o log. Com
+/// `SESSION_STATE_POLL_INTERVAL` de 250 ms, 60 ticks = 15 s — granularidade
+/// suficiente para ver tendência de fps e reconexões num soak de 2 h
+/// (~480 linhas) sem afogar o log.
+const STATS_LOG_EVERY_N_TICKS: u64 = 60;
+
 /// Emite `session_state` a cada tick (`SESSION_STATE_POLL_INTERVAL`) até a
 /// sessão voltar a `Idle` (FR-010) — inclui fps/reconnects atualizados, que
 /// mudam sem necessariamente trocar de `SessionState`. Cada `start_stream`
@@ -1854,7 +1860,9 @@ fn spawn_session_state_emitter(
         let mut last_frame_count = 0u64;
         let mut last_tick = tokio::time::Instant::now();
         let mut smoothed_fps = 0.0f32;
+        let mut ticks: u64 = 0;
         loop {
+            ticks += 1;
             let session = {
                 let state = app.state::<AppState>();
                 state.stream_manager.session(session_id).await
@@ -1918,6 +1926,22 @@ fn spawn_session_state_emitter(
                 stats: session.stats.clone(),
             };
             let _ = app.emit("session_state", payload);
+
+            // As stats iam SÓ para a interface. Num soak de 2 h (SC-005)
+            // isso significa não ter registro nenhum de fps ou de
+            // reconexões depois — restava olhar a tela por duas horas.
+            // Periódico e não a cada tick: o emissor roda a 250 ms, o que
+            // daria ~29 mil linhas em 2 h e afogaria o resto do log.
+            if ticks.is_multiple_of(STATS_LOG_EVERY_N_TICKS) {
+                tracing::info!(
+                    %session_id,
+                    fps = format!("{:.1}", session.stats.fps),
+                    uptime_secs = session.stats.uptime_secs,
+                    reconnects = session.stats.reconnects,
+                    "stats da sessão"
+                );
+            }
+
             if session.state == SessionState::Idle {
                 break;
             }
