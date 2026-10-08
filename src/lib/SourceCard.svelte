@@ -121,7 +121,23 @@
         </button>
       {/if}
     {/if}
-    <span class="fps">{source.stats ? `${source.stats.fps.toFixed(1)} fps` : "—"}</span>
+    <!--
+      No Linux este número é a taxa do preview, não a do stream (ver
+      `fps_is_preview` em types.ts): dizer "4.0 fps" para um stream de 30
+      era desinformação direta na tela. Rotulado, e com o motivo no title.
+    -->
+    <span
+      class="fps"
+      title={source.stats?.fps_is_preview
+        ? "Taxa do preview interno, não do stream: nesta plataforma os quadros vão do scrcpy direto para a câmera virtual e não passam pelo CamLink. O stream usa o fps configurado na fonte."
+        : undefined}
+    >
+      {source.stats
+        ? source.stats.fps_is_preview
+          ? `preview ${source.stats.fps.toFixed(1)}/s`
+          : `${source.stats.fps.toFixed(1)} fps`
+        : "—"}
+    </span>
   </div>
   <span class="meta">{source.meta}</span>
 

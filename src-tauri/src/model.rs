@@ -235,9 +235,28 @@ impl SessionState {
 /// Indicadores de status da sessão (FR-010).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct SessionStats {
+    /// Quadros por segundo MEDIDOS PELO APP — e o que isso significa muda
+    /// por plataforma, daí `fps_is_preview` existir.
     pub fps: f32,
+    /// Segundos desde que esta sessão (`session_id`) começou, reconexões
+    /// incluídas. Era escrito como 0 na criação e nunca atualizado — todas
+    /// as linhas de stats de um soak de 2 h diziam `uptime_secs=0`
+    /// (bancada 2026-10-08). Agora é calculado pelo emissor.
     pub uptime_secs: u64,
     pub reconnects: u32,
+    /// `true` quando `fps` é a taxa do PREVIEW, não do stream.
+    ///
+    /// No Linux o scrcpy escreve os frames direto no device v4l2loopback
+    /// (`--v4l2-sink`) e eles nunca passam pelo app: o contador é alimentado
+    /// pelo leitor de preview, limitado a `PREVIEW_INTERVAL` (200 ms → teto
+    /// de 5/s). A interface mostrava esse número como "fps" e portanto
+    /// anunciava ~4 fps para um stream de 30 — medido em bancada
+    /// (2026-10-08): o log do servidor registrou `frame 16016` em 537 s de
+    /// sessão, ou seja 29,8 fps reais, enquanto as stats diziam 4,0.
+    ///
+    /// No Windows os frames passam pelo app (socket scrcpy → ffmpeg → sink
+    /// DirectShow), então ali `fps` é o do stream de verdade.
+    pub fps_is_preview: bool,
 }
 
 /// Sessão de transmissão: 1 fonte → 1 câmera virtual.

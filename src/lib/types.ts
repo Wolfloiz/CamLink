@@ -36,6 +36,13 @@ export interface SessionStats {
   fps: number;
   uptime_secs: number;
   reconnects: number;
+  /**
+   * `true` quando `fps` é a taxa do PREVIEW, não do stream — é o caso no
+   * Linux, onde o scrcpy escreve direto no v4l2loopback e os frames nunca
+   * passam pelo app (teto de 5/s pelo intervalo do preview). Mostrar esse
+   * número como "fps" anunciava ~4 fps para um stream de 30.
+   */
+  fps_is_preview: boolean;
 }
 
 export type SessionSource = { android: string } | { rtsp: string };

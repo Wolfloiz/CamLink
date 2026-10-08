@@ -465,3 +465,37 @@ fn scrcpy_version_matches_the_pinned_client() {
          dois — e o `versionName` do scrcpy/server/build.gradle."
     );
 }
+
+/// T100 (bancada 2026-10-08): o `fps` das stats significa coisas diferentes
+/// por plataforma, e a interface mostrava o número do Linux como se fosse o
+/// do stream — anunciava ~4 fps para um stream que o log do servidor provou
+/// estar a 29,8 (`frame 16016` em 537 s). No Linux os quadros vão do scrcpy
+/// direto ao v4l2loopback e o contador do app é o do preview, limitado a
+/// 5/s; no Windows eles passam pelo app e o número é do stream.
+#[tokio::test]
+async fn stats_dizem_se_o_fps_e_do_preview() {
+    let jar = tempfile::NamedTempFile::new().expect("temp do jar");
+    let mut paths = base_paths(Vec::new());
+    paths.server_jar = Some(jar.path().to_path_buf());
+
+    let manager = StreamManager::new(paths);
+    let session_id = manager
+        .start(
+            SessionSource::Android("R58M12ABCDE".into()),
+            sample_config(),
+            "/dev/video0",
+            None,
+        )
+        .await
+        .expect("start");
+
+    let session = manager.session(session_id).await.expect("sessão viva");
+    let _ = manager.stop(session_id).await;
+
+    assert_eq!(
+        session.stats.fps_is_preview,
+        cfg!(target_os = "linux"),
+        "a flag tem que dizer a verdade sobre o que `fps` mede nesta \
+         plataforma: no Linux é a taxa do preview, no Windows a do stream"
+    );
+}

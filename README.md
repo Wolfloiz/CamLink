@@ -360,6 +360,16 @@ oficial do upstream, baixado da release do Genymobile sem alteração — só o
   upstream, não há o que o CamLink possa fazer além de falhar de forma
   previsível e avisar, que é o comportamento atual.
 
+  **Medido em sessão longa** (SM-S921B, Android 16, 2 h 18 min, 2026-10-08):
+  17 desconexões de câmera, das quais o aplicativo se recuperou em todas.
+  O padrão não é degradação progressiva — houve um trecho de 38 minutos sem
+  nenhuma falha entre duas rajadas. As mensagens vêm do servidor no celular
+  (`Camera disconnected`, `Camera capture failed: frame N`), e são os
+  callbacks `onDisconnected`/`onCaptureFailed` do Android emitidos por código
+  do scrcpy upstream, não do fork do CamLink — confirmado por `git blame`.
+  Na mesma sessão o consumo de memória CAIU (560 → 358 MiB), então não há
+  vazamento associado; o que o quirk causa é interrupção, não degradação.
+
 ## Contribuindo
 
 Veja [CONTRIBUTING.md](CONTRIBUTING.md) para o fluxo de PRs e issues.

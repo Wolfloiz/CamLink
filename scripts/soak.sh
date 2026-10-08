@@ -127,9 +127,35 @@ if [[ -n "$LOG" && -f "$LOG" ]]; then
   bold "Do log do app ($LOG)"
   STATS="$(grep -F 'stats da sessão' "$LOG" || true)"
   if [[ -n "$STATS" ]]; then
-    echo "  linhas de stats: $(wc -l <<<"$STATS")"
-    echo "  fps (min/máx):   $(sed -n 's/.*fps="\([0-9.]*\)".*/\1/p' <<<"$STATS" | sort -g | sed -n '1p;$p' | paste -sd'/')"
-    echo "  reconexões:      $(sed -n 's/.*reconnects=\([0-9]*\).*/\1/p' <<<"$STATS" | sort -g | tail -1)"
+    echo "  linhas de stats:  $(wc -l <<<"$STATS")"
+    echo "  uptime final:     $(sed -n 's/.*uptime_secs=\([0-9]*\).*/\1/p' <<<"$STATS" | sort -g | tail -1)s"
+    echo "  reconexões:       $(sed -n 's/.*reconnects=\([0-9]*\).*/\1/p' <<<"$STATS" | sort -g | tail -1)"
+
+    # O que esse fps mede depende da plataforma, e reportá-lo como "fps do
+    # stream" no Linux foi erro deste script: lá os quadros vão do scrcpy
+    # direto ao v4l2loopback e o contador do app é o do PREVIEW (teto de 5/s).
+    # Na primeira execução real isso produziu "fps 0.8/4.5" num stream que
+    # estava a 29,8 fps — número correto, rótulo errado, conclusão errada.
+    FPS_RANGE="$(sed -n 's/.*fps="\([0-9.]*\)".*/\1/p' <<<"$STATS" | sort -g | sed -n '1p;$p' | paste -sd'/')"
+    if [[ "$(uname -s)" == "Linux" ]]; then
+      echo "  preview (mín/máx): ${FPS_RANGE}/s  — NÃO é o fps do stream"
+      echo "     No Linux os quadros não passam pelo app; o teto aqui é 5/s."
+      echo "     Para o fps real do stream, meça do lado do consumidor:"
+      echo "       ffmpeg -f v4l2 -i /dev/videoN -t 10 -f null - 2>&1 | tail -2"
+    else
+      echo "  fps (mín/máx):    ${FPS_RANGE}"
+    fi
+
+    # Desconexões de câmera relatadas pelo SERVIDOR (lado Android). Não são
+    # falha do CamLink: são os callbacks onDisconnected/onCaptureFailed do
+    # Android, e em aparelhos Samsung aparecem por um bug conhecido do
+    # scrcpy upstream (ver "Limitações conhecidas" no README).
+    CAMDISC="$(grep -cF 'Camera disconnected' "$LOG" || true)"
+    if ((${CAMDISC:-0} > 0)); then
+      yellow "  câmera desconectada pelo Android: ${CAMDISC}x"
+      echo "     Cada uma interrompe o stream e dispara reconexão. Em Samsung é"
+      echo "     esperado (quirk do upstream); em outros aparelhos, investigar."
+    fi
   else
     yellow "  nenhuma linha de stats da sessão neste log."
     echo "     Significa que NENHUMA fonte transmitiu durante o soak (abra o app,"
