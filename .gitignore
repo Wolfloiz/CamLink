@@ -13,3 +13,6 @@ vite.config.ts.timestamp-*
 # Added by cargo
 
 /target
+
+# Saída do scripts/soak.sh — medição de execução, não fonte.
+soak-*.csv

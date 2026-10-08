@@ -1366,6 +1366,10 @@ impl StreamManager {
                 fps: 0.0,
                 uptime_secs: 0,
                 reconnects: 0,
+                // Ver doc de `SessionStats::fps_is_preview`: no Linux os
+                // frames não passam pelo app, então o que medimos é o
+                // preview.
+                fps_is_preview: cfg!(target_os = "linux"),
             },
         };
         session.apply(SessionEvent::Start)?;

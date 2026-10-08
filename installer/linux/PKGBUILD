@@ -7,10 +7,29 @@
 # não são dependências razoáveis para um pacote de desktop — vem pronto como
 # asset da release (mesmo jar que o instalador Windows/deb embutem, FR-024).
 #
-# Ao publicar uma release, troque os dois `SKIP` de `sha256sums` (o tarball
-# do GitHub e o jar) pelos hashes reais (`makepkg -g`) e gere o .SRCINFO
-# (`makepkg --printsrcinfo > .SRCINFO`). O terceiro hash, do cliente scrcpy,
-# já é fixo — só muda quando $_scrcpyver mudar.
+# Por que os dois primeiros hashes são `SKIP` AQUI e reais no AUR.
+#
+# O primeiro é o do tarball desta própria tag — que é um snapshot do repo e
+# portanto INCLUI este arquivo. Um PKGBUILD que contivesse o hash do tarball
+# que o contém seria autorreferencial: impossível por construção, não por
+# descuido. O segundo, do jar, muda a cada build do fork, então um valor
+# fixado aqui envelhece na release seguinte.
+#
+# O repositório do AUR é separado deste (é o fluxo normal do AUR), e é lá
+# que os valores reais vivem. Ao publicar uma release:
+#
+#   cd installer/linux
+#   makepkg -g                               # imprime os dois hashes reais
+#   makepkg --printsrcinfo > .SRCINFO        # com eles já no lugar
+#
+# e esses dois arquivos vão para o repositório do AUR, não para cá.
+#
+# `makepkg -g` exige a release PUBLICADA: em rascunho a URL dos assets
+# responde 404 (medido em 2026-10-08) — nem o mantenedor nem quem instala
+# conseguem baixar o jar.
+#
+# O terceiro hash é do cliente scrcpy, que é pinado: fica aqui porque só
+# muda quando $_scrcpyver mudar.
 pkgname=camlink
 pkgver=0.1.0
 pkgrel=1

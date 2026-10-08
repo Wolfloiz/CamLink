@@ -1861,6 +1861,11 @@ fn spawn_session_state_emitter(
         let mut last_tick = tokio::time::Instant::now();
         let mut smoothed_fps = 0.0f32;
         let mut ticks: u64 = 0;
+        // Vida deste emissor == vida do `session_id`: o supervisor reconecta
+        // mantendo o mesmo id (só `switch_camera` e rotação criam um novo),
+        // então "tempo desde o início da sessão, reconexões incluídas" é
+        // exatamente o que isto mede.
+        let session_started = tokio::time::Instant::now();
         loop {
             ticks += 1;
             let session = {
@@ -1892,6 +1897,11 @@ fn spawn_session_state_emitter(
                     smoothed_fps * FPS_SMOOTHING + instantaneous_fps * (1.0 - FPS_SMOOTHING);
             }
             session.stats.fps = smoothed_fps;
+            // Escrito como 0 na criação da sessão e nunca atualizado em
+            // lugar nenhum: as 486 linhas de stats de um soak de 2 h
+            // diziam `uptime_secs=0` (bancada 2026-10-08). Calculado aqui
+            // pelo mesmo motivo que o fps — o emissor é quem tem o tempo.
+            session.stats.uptime_secs = session_started.elapsed().as_secs();
             last_frame_count = current_count;
             last_tick = now;
 
