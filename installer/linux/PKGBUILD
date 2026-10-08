@@ -7,19 +7,29 @@
 # não são dependências razoáveis para um pacote de desktop — vem pronto como
 # asset da release (mesmo jar que o instalador Windows/deb embutem, FR-024).
 #
-# A CADA release nova, regenere os dois primeiros hashes e o .SRCINFO:
+# Por que os dois primeiros hashes são `SKIP` AQUI e reais no AUR.
+#
+# O primeiro é o do tarball desta própria tag — que é um snapshot do repo e
+# portanto INCLUI este arquivo. Um PKGBUILD que contivesse o hash do tarball
+# que o contém seria autorreferencial: impossível por construção, não por
+# descuido. O segundo, do jar, muda a cada build do fork, então um valor
+# fixado aqui envelhece na release seguinte.
+#
+# O repositório do AUR é separado deste (é o fluxo normal do AUR), e é lá
+# que os valores reais vivem. Ao publicar uma release:
 #
 #   cd installer/linux
-#   makepkg -g                               # tarball da tag + jar da release
-#   makepkg --printsrcinfo > .SRCINFO
+#   makepkg -g                               # imprime os dois hashes reais
+#   makepkg --printsrcinfo > .SRCINFO        # com eles já no lugar
 #
-# Os dois dependem do artefato EXATO: o do tarball muda se a tag for movida,
-# e o do jar muda a cada build do fork. O terceiro, do cliente scrcpy, só
+# e esses dois arquivos vão para o repositório do AUR, não para cá.
+#
+# `makepkg -g` exige a release PUBLICADA: em rascunho a URL dos assets
+# responde 404 (medido em 2026-10-08) — nem o mantenedor nem quem instala
+# conseguem baixar o jar.
+#
+# O terceiro hash é do cliente scrcpy, que é pinado: fica aqui porque só
 # muda quando $_scrcpyver mudar.
-#
-# `makepkg -g` precisa que o jar esteja PUBLICADO: numa release em rascunho
-# a URL dos assets responde 404 (verificado em 2026-10-08), e aí nem o
-# `makepkg` do mantenedor nem o de quem instala conseguem baixar.
 pkgname=camlink
 pkgver=0.1.0
 pkgrel=1
@@ -54,8 +64,8 @@ _scrcpyver=4.1
 source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz"
         "scrcpy-server-camlink-${pkgver}::${url}/releases/download/v${pkgver}/scrcpy-server-camlink"
         "https://github.com/Genymobile/scrcpy/releases/download/v${_scrcpyver}/scrcpy-linux-x86_64-v${_scrcpyver}.tar.gz")
-sha256sums=('dfd3f935cb66cae6e98b8bfcce5db1b2563a8132a90f12e57b6005402f495012'
-            'b9a14bb908b557d8c517692053313a1fb2cc5af51ed69084289da6fd0f78bdc8'
+sha256sums=('SKIP'
+            'SKIP'
             'ad56ae8bfeedf41e824945c11dbf55fcb092b3e615b9b486f48a50e30d389635')
 
 build() {

@@ -20,8 +20,8 @@ pkgbase = camlink
 	source = camlink-0.1.0.tar.gz::https://github.com/Wolfloiz/CamLink/archive/refs/tags/v0.1.0.tar.gz
 	source = scrcpy-server-camlink-0.1.0::https://github.com/Wolfloiz/CamLink/releases/download/v0.1.0/scrcpy-server-camlink
 	source = https://github.com/Genymobile/scrcpy/releases/download/v4.1/scrcpy-linux-x86_64-v4.1.tar.gz
-	sha256sums = dfd3f935cb66cae6e98b8bfcce5db1b2563a8132a90f12e57b6005402f495012
-	sha256sums = b9a14bb908b557d8c517692053313a1fb2cc5af51ed69084289da6fd0f78bdc8
+	sha256sums = SKIP
+	sha256sums = SKIP
 	sha256sums = ad56ae8bfeedf41e824945c11dbf55fcb092b3e615b9b486f48a50e30d389635
 
 pkgname = camlink
