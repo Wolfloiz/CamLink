@@ -7,10 +7,19 @@
 # não são dependências razoáveis para um pacote de desktop — vem pronto como
 # asset da release (mesmo jar que o instalador Windows/deb embutem, FR-024).
 #
-# Ao publicar uma release, troque os dois `SKIP` de `sha256sums` (o tarball
-# do GitHub e o jar) pelos hashes reais (`makepkg -g`) e gere o .SRCINFO
-# (`makepkg --printsrcinfo > .SRCINFO`). O terceiro hash, do cliente scrcpy,
-# já é fixo — só muda quando $_scrcpyver mudar.
+# A CADA release nova, regenere os dois primeiros hashes e o .SRCINFO:
+#
+#   cd installer/linux
+#   makepkg -g                               # tarball da tag + jar da release
+#   makepkg --printsrcinfo > .SRCINFO
+#
+# Os dois dependem do artefato EXATO: o do tarball muda se a tag for movida,
+# e o do jar muda a cada build do fork. O terceiro, do cliente scrcpy, só
+# muda quando $_scrcpyver mudar.
+#
+# `makepkg -g` precisa que o jar esteja PUBLICADO: numa release em rascunho
+# a URL dos assets responde 404 (verificado em 2026-10-08), e aí nem o
+# `makepkg` do mantenedor nem o de quem instala conseguem baixar.
 pkgname=camlink
 pkgver=0.1.0
 pkgrel=1
@@ -45,8 +54,8 @@ _scrcpyver=4.1
 source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz"
         "scrcpy-server-camlink-${pkgver}::${url}/releases/download/v${pkgver}/scrcpy-server-camlink"
         "https://github.com/Genymobile/scrcpy/releases/download/v${_scrcpyver}/scrcpy-linux-x86_64-v${_scrcpyver}.tar.gz")
-sha256sums=('SKIP'
-            'SKIP'
+sha256sums=('dfd3f935cb66cae6e98b8bfcce5db1b2563a8132a90f12e57b6005402f495012'
+            'b9a14bb908b557d8c517692053313a1fb2cc5af51ed69084289da6fd0f78bdc8'
             'ad56ae8bfeedf41e824945c11dbf55fcb092b3e615b9b486f48a50e30d389635')
 
 build() {
