@@ -298,3 +298,28 @@ fn auth_e_inacessivel_continuam_sem_texto_livre() {
         RtspFailure::Unreachable
     );
 }
+
+// ---------------------------------------------------------------------------
+// T073 — o 401 não é só "senha errada"
+//
+// Em bancada (2026-10-14) `rtsp://192.168.1.4:8080` sem o caminho do stream
+// fez o IP Webcam responder `method OPTIONS failed: 401`, embora o app não
+// tivesse senha nenhuma configurada (confirmado: GET / e GET /video
+// respondiam 200 sem credencial, e a MESMA URL com
+// `/h264_ulaw.sdp` transmitiu 651 frames a ~61 fps). A dica mandava o
+// usuário procurar uma credencial inexistente.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dica_de_401_menciona_o_caminho_do_stream() {
+    let hint = RtspFailure::AuthFailed.action_hint();
+    assert!(
+        hint.to_lowercase().contains("caminho"),
+        "um 401 costuma ser caminho de stream ausente, não senha — a dica \
+         precisa dizer isso: {hint}"
+    );
+    assert!(
+        hint.to_lowercase().contains("senha"),
+        "e sem deixar de citar a credencial, que é a outra causa: {hint}"
+    );
+}

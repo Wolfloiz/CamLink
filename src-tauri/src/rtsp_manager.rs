@@ -167,8 +167,19 @@ impl RtspFailure {
     /// Dica acionável exibida na UI junto do erro.
     pub fn action_hint(&self) -> String {
         match self {
+            // O 401 não significa só "senha errada". Servidores respondem
+            // 401 quando o CAMINHO do stream está ausente ou errado — foi o
+            // que aconteceu em bancada (2026-10-14) com `rtsp://host:8080`
+            // sem caminho no IP Webcam, que não tinha senha alguma
+            // configurada. A dica antiga mandava procurar uma credencial
+            // que não existia; esta cobre as duas causas, na ordem em que
+            // compensa investigar.
             RtspFailure::AuthFailed => {
-                "Verifique o usuário e a senha da câmera (credenciais recusadas).".to_string()
+                "A câmera recusou o acesso (401). Confira o CAMINHO do stream na URL — \
+                 muitos servidores respondem 401 quando ele falta (ex.: \
+                 rtsp://host:8080/h264_ulaw.sdp em vez de rtsp://host:8080) — e, \
+                 se a câmera tiver senha, o usuário e a senha."
+                    .to_string()
             }
             RtspFailure::Unreachable => {
                 "Câmera inacessível: confira o endereço, a porta e se ela está na mesma rede."
@@ -258,6 +269,16 @@ pub async fn probe_url(
         Ok((Ok(status), _)) if status.success() => Ok(()),
         Ok((_, stderr_text)) => {
             let failure = classify_ffmpeg_failure(&stderr_text);
+            // Sem isto o log dizia apenas `code=rtsp_auth` e não havia como
+            // descobrir a causa: o `AuthFailed` não carrega texto, de
+            // propósito. Em bancada (2026-10-14) uma URL sem o caminho do
+            // stream fez o IP Webcam responder 401, o usuário foi mandado
+            // procurar uma senha que não existia, e o log não ajudava.
+            // Logar ficou seguro com `redact_credentials` (T073).
+            tracing::warn!(
+                stderr = %redact_credentials(stderr_text.trim()),
+                "probe RTSP: stderr do ffmpeg"
+            );
             let code = match &failure {
                 RtspFailure::AuthFailed => "rtsp_auth",
                 RtspFailure::Unreachable => "rtsp_inacessivel",
@@ -508,6 +529,11 @@ async fn run_ffmpeg_once(
     if status.success() {
         Ok(())
     } else {
+        // Mesmo motivo do probe: a classificação sozinha não diz a causa.
+        tracing::warn!(
+            stderr = %redact_credentials(stderr_text.trim()),
+            "sessão RTSP: stderr do ffmpeg"
+        );
         Err(classify_ffmpeg_failure(&stderr_text))
     }
 }
