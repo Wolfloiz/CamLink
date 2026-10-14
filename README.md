@@ -310,7 +310,16 @@ auditado, não apenas declarado:
 - **Credenciais**: senhas de câmeras RTSP ficam apenas no cofre do sistema
   operacional (Secret Service no Linux, Gerenciador de Credenciais no
   Windows). Nunca no arquivo de configuração, e os logs censuram a
-  credencial na URL antes de escrever.
+  credencial na URL antes de escrever — inclusive quando ela chega de
+  rebote, pelo texto de erro do próprio `ffmpeg`, que ecoa a URL de entrada
+  (corrigido na auditoria de 2026-10-14, com teste de regressão).
+- **Registro em arquivo**: o aplicativo grava um log local em
+  `~/.local/share/CamLink/logs/` (Linux) ou `%LOCALAPPDATA%\CamLink\logs\`
+  (Windows), com rotação diária e no máximo sete arquivos. Ele existe para
+  você poder diagnosticar um problema ou anexar a um relato de bug, e **não
+  é enviado a lugar nenhum** — nada no aplicativo tem como enviá-lo. Se for
+  compartilhá-lo, saiba que ele contém nomes de modelo do aparelho e
+  endereços das suas fontes RTSP (sem as senhas).
 - **Vídeo**: os frames nunca saem da máquina. Vão do celular (USB) ou da
   câmera IP direto para o dispositivo de câmera virtual local, consumido
   por OBS/navegador/Discord na mesma máquina.

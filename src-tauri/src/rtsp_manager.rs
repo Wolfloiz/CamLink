@@ -195,13 +195,12 @@ pub fn classify_ffmpeg_failure(stderr: &str) -> RtspFailure {
     {
         return RtspFailure::Unreachable;
     }
-    RtspFailure::Other(
-        stderr
-            .lines()
-            .last()
-            .unwrap_or("erro desconhecido")
-            .to_string(),
-    )
+    // Censurado aqui, no ponto de entrada: daqui o texto vai tanto para o
+    // log (`?failure`) quanto para a interface (`action_hint`), e proteger
+    // só um dos dois deixaria o outro vazando.
+    RtspFailure::Other(redact_credentials(
+        stderr.lines().last().unwrap_or("erro desconhecido"),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +417,37 @@ fn redact_url(url: &str) -> String {
         (Some((scheme, _)), Some((_, host))) => format!("{scheme}://***@{host}"),
         _ => url.to_string(),
     }
+}
+
+/// Censura credenciais embutidas em QUALQUER posição de um texto livre —
+/// diferente de `redact_url`, que espera a URL inteira e só ela.
+///
+/// Existe porque o ffmpeg ecoa a URL de entrada no stderr, e a última linha
+/// dele viaja dentro de `RtspFailure::Other`: dali ela ia para o log (via
+/// `?failure`) e para a interface (via `action_hint`). O campo vizinho já
+/// usava `redact_url`, mas isso não servia de nada com a URL crua no campo
+/// seguinte — auditoria de privacidade do T073 (2026-10-14). Com o log em
+/// arquivo do T098, a credencial passou a PERSISTIR em disco.
+///
+/// `user:senha` só pode aparecer antes da primeira `/` do caminho e não
+/// contém espaço, então é esse trecho que é substituído.
+pub fn redact_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("://") {
+        let after = pos + "://".len();
+        out.push_str(&rest[..after]);
+        rest = &rest[after..];
+        let authority_end = rest
+            .find(|c: char| c == '/' || c.is_whitespace())
+            .unwrap_or(rest.len());
+        if let Some(at) = rest[..authority_end].find('@') {
+            out.push_str("***@");
+            rest = &rest[at + 1..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Uma execução do ffmpeg: retorna `Ok` em EOF limpo (fonte encerrou) ou a

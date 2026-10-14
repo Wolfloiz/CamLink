@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use camlink_lib::rtsp_manager::{
     classify_ffmpeg_failure, ffmpeg_input_args, inject_credentials, output_args_rawvideo,
-    output_args_v4l2, probe_url_with_retry, validate_rtsp_url, RtspFailure,
+    output_args_v4l2, probe_url_with_retry, redact_credentials, validate_rtsp_url, RtspFailure,
 };
 
 // ---------------------------------------------------------------------------
@@ -230,5 +230,71 @@ async fn probe_url_with_retry_gives_up_after_max_attempts() {
     assert_eq!(
         attempts, 3,
         "deveria ter tentado exatamente max_attempts vezes"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T073 — credencial não vaza pelo stderr do ffmpeg
+//
+// O ffmpeg ecoa a URL de entrada no stderr, e a última linha dele viaja
+// dentro de `RtspFailure::Other`: dali ia para o log (`?failure`) e para a
+// interface (`action_hint`). O campo vizinho no log já usava `redact_url`,
+// o que não protegia nada com a URL crua no campo seguinte. Com o log em
+// arquivo do T098, a credencial passou a PERSISTIR em disco.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stderr_do_ffmpeg_nao_carrega_credencial_para_a_falha() {
+    // Erro que NÃO casa auth nem inacessível, para cair no fallback `Other`
+    // — é o único caminho que carrega texto livre do ffmpeg.
+    let stderr = "[rtsp @ 0x5] method DESCRIBE failed\nrtsp://camila:s3nh4-secreta@192.168.1.9:554/stream: Invalid data found when processing input";
+
+    let failure = classify_ffmpeg_failure(stderr);
+    let RtspFailure::Other(msg) = &failure else {
+        panic!("esperava Other, veio {failure:?}");
+    };
+
+    assert!(
+        !msg.contains("s3nh4-secreta") && !msg.contains("camila"),
+        "a credencial não pode sobreviver na falha — ela vai para o log em \
+         arquivo e para a tela: {msg}"
+    );
+    assert!(
+        msg.contains("192.168.1.9") && msg.contains("Invalid data found"),
+        "o host e a causa têm que sobreviver, senão o erro deixa de ser \
+         diagnosticável: {msg}"
+    );
+}
+
+#[test]
+fn redacao_preserva_texto_sem_credencial() {
+    // Sem `@` não há userinfo: a URL não deve ser mexida.
+    assert_eq!(
+        redact_credentials("rtsp://192.168.1.9:554/stream: timed out"),
+        "rtsp://192.168.1.9:554/stream: timed out"
+    );
+    // Texto sem URL nenhuma passa intacto.
+    assert_eq!(
+        redact_credentials("Invalid data found when processing input"),
+        "Invalid data found when processing input"
+    );
+    // Mais de uma URL na mesma linha.
+    assert_eq!(
+        redact_credentials("rtsp://a:b@h1/s e rtsp://c:d@h2/s"),
+        "rtsp://***@h1/s e rtsp://***@h2/s"
+    );
+}
+
+#[test]
+fn auth_e_inacessivel_continuam_sem_texto_livre() {
+    // Estes dois caminhos classificam ANTES do fallback, então nunca
+    // carregam stderr — é o que mantém a superfície de vazamento pequena.
+    assert_eq!(
+        classify_ffmpeg_failure("rtsp://u:p@h/s: 401 Unauthorized"),
+        RtspFailure::AuthFailed
+    );
+    assert_eq!(
+        classify_ffmpeg_failure("rtsp://u:p@h/s: Connection timed out"),
+        RtspFailure::Unreachable
     );
 }
