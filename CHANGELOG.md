@@ -3,16 +3,12 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/);
 o projeto segue [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
-## [Não publicado]
+## [0.1.0] — 2026-11-10
 
-### 0.1.0 — primeira versão
+Primeira versão. Validada em instalação limpa no Ubuntu 22.04/24.04, Arch e
+Windows 10/11, com sessão contínua de 2 h no Linux sem vazamento de memória.
 
-Ainda **não publicada**: o código está completo e validado em bancada, mas a
-validação de instalação limpa (Ubuntu, Arch, Windows 10/11) e o teste de
-estabilidade de 2 h ainda não foram concluídos. Acompanhe em
-[`specs/001-phone-webcam-bridge/tasks.md`](specs/001-phone-webcam-bridge/tasks.md).
-
-#### Adicionado
+### Adicionado
 
 - **Celular Android como webcam virtual, sem instalar nada no aparelho.**
   A comunicação acontece por USB/ADB com um fork do `scrcpy-server` enviado
@@ -42,8 +38,10 @@ estabilidade de 2 h ainda não foram concluídos. Acompanhe em
 - **Diagnóstico de pré-requisitos** no Linux: `install.sh --check` lista o
   que falta, item por item, sem precisar de senha.
 
-#### Segurança e privacidade
+### Segurança e privacidade
 
+- A senha de uma câmera RTSP não aparece mais no log nem na tela quando o
+  `ffmpeg` a ecoa numa mensagem de erro.
 - Nenhuma telemetria, analytics ou verificação de atualização. A única
   comunicação de rede é o consumo das fontes RTSP configuradas pelo usuário;
   auditado e descrito em [README.md](README.md#privacidade).
@@ -54,7 +52,13 @@ estabilidade de 2 h ainda não foram concluídos. Acompanhe em
 - O aplicativo roda sem privilégios: o acesso ao dispositivo de vídeo virtual
   vem do grupo `video`, não de `sudo` ou `pkexec`.
 
-#### Limitações conhecidas
+### Corrigido antes do lançamento
+
+- Uma resposta 401 de uma fonte RTSP sem senha deixou de mandar o usuário
+  procurar uma senha que não existe, e o log passou a mostrar o motivo da
+  recusa.
+
+### Limitações conhecidas
 
 Descritas em [README.md](README.md#limitações-conhecidas). Em resumo: no
 Linux, girar ou trocar de câmera pode exigir recarregar a página no

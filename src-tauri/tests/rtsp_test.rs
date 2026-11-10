@@ -286,6 +286,43 @@ fn redacao_preserva_texto_sem_credencial() {
 }
 
 #[test]
+fn senha_com_espaco_nao_vaza_na_redacao() {
+    // Achado na revisão da v0.1.0: a autoridade terminava no primeiro
+    // espaço, então `cam:minha` não tinha `@` e `senha@host` passava cru.
+    let texto = "rtsp://cam:minha senha@192.168.1.9:554/stream: 404 Not Found";
+    let censurado = redact_credentials(texto);
+    assert!(!censurado.contains("minha"), "vazou: {censurado}");
+    assert!(!censurado.contains("senha"), "vazou: {censurado}");
+    assert_eq!(
+        censurado,
+        "rtsp://***@192.168.1.9:554/stream: 404 Not Found"
+    );
+}
+
+#[test]
+fn redacao_nao_atravessa_quebra_de_linha() {
+    // Uma URL sem caminho no fim da linha não pode engolir a seguinte.
+    assert_eq!(
+        redact_credentials("rtsp://192.168.1.9:554\nuser@host: erro"),
+        "rtsp://192.168.1.9:554\nuser@host: erro"
+    );
+}
+
+#[test]
+fn senha_com_espaco_e_codificada_na_url() {
+    // Na raiz: a credencial injetada não pode carregar espaço cru, que
+    // quebraria a URL no ffmpeg e a redação.
+    assert_eq!(
+        inject_credentials("rtsp://cam@192.168.1.9/s", Some("minha senha")),
+        "rtsp://cam:minha%20senha@192.168.1.9/s"
+    );
+    assert_eq!(
+        inject_credentials("rtsp://192.168.1.9/s", Some("cam:a b\tc")),
+        "rtsp://cam:a%20b%09c@192.168.1.9/s"
+    );
+}
+
+#[test]
 fn auth_e_inacessivel_continuam_sem_texto_livre() {
     // Estes dois caminhos classificam ANTES do fallback, então nunca
     // carregam stderr — é o que mantém a superfície de vazamento pequena.
@@ -296,5 +333,30 @@ fn auth_e_inacessivel_continuam_sem_texto_livre() {
     assert_eq!(
         classify_ffmpeg_failure("rtsp://u:p@h/s: Connection timed out"),
         RtspFailure::Unreachable
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T073 — o 401 não é só "senha errada"
+//
+// Em bancada (2026-10-14) `rtsp://192.168.1.4:8080` sem o caminho do stream
+// fez o IP Webcam responder `method OPTIONS failed: 401`, embora o app não
+// tivesse senha nenhuma configurada (confirmado: GET / e GET /video
+// respondiam 200 sem credencial, e a MESMA URL com
+// `/h264_ulaw.sdp` transmitiu 651 frames a ~61 fps). A dica mandava o
+// usuário procurar uma credencial inexistente.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dica_de_401_menciona_o_caminho_do_stream() {
+    let hint = RtspFailure::AuthFailed.action_hint();
+    assert!(
+        hint.to_lowercase().contains("caminho"),
+        "um 401 costuma ser caminho de stream ausente, não senha — a dica \
+         precisa dizer isso: {hint}"
+    );
+    assert!(
+        hint.to_lowercase().contains("senha"),
+        "e sem deixar de citar a credencial, que é a outra causa: {hint}"
     );
 }
