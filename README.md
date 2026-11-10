@@ -28,19 +28,15 @@ Firefox — WebRTC), Discord e qualquer aplicativo que use câmera.
 
 ## Status
 
-🚧 **Ainda não há release publicada.** Todas as funcionalidades abaixo
-existem e foram validadas em bancada, mas os instaladores ainda não estão
-disponíveis para download — por enquanto é preciso
-[compilar do código-fonte](#compilando-do-código-fonte). Acompanhe o
-progresso em [`specs/001-phone-webcam-bridge/`](specs/001-phone-webcam-bridge/).
+**v0.1.0 — primeira versão.** Instaladores para Linux (`.deb`, AppImage) e
+Windows 10/11 (NSIS, MSI) estão na
+[página de releases](https://github.com/Wolfloiz/CamLink/releases). Validada
+em instalação limpa no Ubuntu, Arch e Windows 10/11. O que mudou está no
+[CHANGELOG](CHANGELOG.md).
 
 ## Instalação
 
-> 🚧 **Os pacotes abaixo ainda não estão publicados.** Enquanto não houver
-> release, os instaladores precisam ser
-> [compilados do código-fonte](#compilando-do-código-fonte). As instruções
-> desta seção descrevem como será a instalação quando os arquivos estiverem
-> disponíveis.
+Baixe os arquivos da [release mais recente](https://github.com/Wolfloiz/CamLink/releases/latest).
 
 ### Linux
 
@@ -61,11 +57,14 @@ pacote, na versão exata que o CamLink precisa — você não instala nem
 atualiza nada por fora. Veja [por que embutido](#por-que-o-scrcpy-vai-embutido).
 
 **Arch / Manjaro / EndeavourOS** — o pacote **ainda não está no AUR**, então
-`yay -S camlink` não encontra nada. O `PKGBUILD` existe em
-`installer/linux/PKGBUILD` e passa a funcionar assim que houver uma release
-publicada, porque ele baixa os fontes a partir da tag.
+`yay -S camlink` não encontra nada. Use o `PKGBUILD` do repositório, que baixa
+os fontes da tag publicada:
 
-Por enquanto, no Arch, use o AppImage ou compile do código-fonte.
+```bash
+cd installer/linux && makepkg -si
+```
+
+Ou use o AppImage.
 
 **AppImage** — baixe o `.AppImage` e o `install-appimage.sh` da mesma
 release, e rode:
