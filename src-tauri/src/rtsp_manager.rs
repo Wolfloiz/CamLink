@@ -101,6 +101,11 @@ fn percent_encode(raw: &str) -> String {
             '#' => out.push_str("%23"),
             '[' => out.push_str("%5B"),
             ']' => out.push_str("%5D"),
+            // Espaço e controles crus quebram a URL no ffmpeg e escapam da
+            // `redact_credentials` (achado na revisão da v0.1.0).
+            c if c.is_ascii_whitespace() || c.is_ascii_control() => {
+                out.push_str(&format!("%{:02X}", c as u32));
+            }
             other => out.push(other),
         }
     }
@@ -450,8 +455,10 @@ fn redact_url(url: &str) -> String {
 /// seguinte — auditoria de privacidade do T073 (2026-10-14). Com o log em
 /// arquivo do T098, a credencial passou a PERSISTIR em disco.
 ///
-/// `user:senha` só pode aparecer antes da primeira `/` do caminho e não
-/// contém espaço, então é esse trecho que é substituído.
+/// `user:senha` só pode aparecer antes da primeira `/` do caminho, então é
+/// esse trecho que é substituído. Espaço NÃO encerra a autoridade: uma
+/// senha com espaço digitada direto na URL escaparia da censura. Na
+/// dúvida, censurar a mais (até a quebra de linha) é o lado seguro.
 pub fn redact_credentials(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -459,9 +466,7 @@ pub fn redact_credentials(text: &str) -> String {
         let after = pos + "://".len();
         out.push_str(&rest[..after]);
         rest = &rest[after..];
-        let authority_end = rest
-            .find(|c: char| c == '/' || c.is_whitespace())
-            .unwrap_or(rest.len());
+        let authority_end = rest.find(['/', '\n', '\r']).unwrap_or(rest.len());
         if let Some(at) = rest[..authority_end].find('@') {
             out.push_str("***@");
             rest = &rest[at + 1..];
