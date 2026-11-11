@@ -87,29 +87,35 @@ pub fn output_args_rawvideo() -> Vec<String> {
     ]
 }
 
-/// Percent-encode dos caracteres que quebrariam o parsing de URL do ffmpeg
-/// dentro de credenciais (`%` primeiro para não re-escapar).
+/// Caracteres que podem ir CRUS na userinfo de uma URL — RFC 3986:
+/// unreserved + sub-delims. Qualquer outro byte sai percent-encoded.
+const USERINFO_SAFE: &[u8] = b"-._~!$&'()*+,;=";
+
+/// Percent-encode de uma credencial que vai dentro da URL.
+///
+/// A lógica é invertida de propósito: passa cru só o que a RFC permite.
+/// Enumerar os caracteres "perigosos" já falhou duas vezes — o espaço e os
+/// controles só entraram numa correção posterior, e os não-ASCII (um
+/// acento, um espaço não separável vindo de copiar-e-colar) continuavam
+/// indo crus para o ffmpeg, que respondia "Invalid argument" sem nenhuma
+/// pista de que a culpa era da senha.
 fn percent_encode(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        match ch {
-            '%' => out.push_str("%25"),
-            '@' => out.push_str("%40"),
-            ':' => out.push_str("%3A"),
-            '/' => out.push_str("%2F"),
-            '?' => out.push_str("%3F"),
-            '#' => out.push_str("%23"),
-            '[' => out.push_str("%5B"),
-            ']' => out.push_str("%5D"),
-            // Espaço e controles crus quebram a URL no ffmpeg e escapam da
-            // `redact_credentials` (achado na revisão da v0.1.0).
-            c if c.is_ascii_whitespace() || c.is_ascii_control() => {
-                out.push_str(&format!("%{:02X}", c as u32));
-            }
-            other => out.push(other),
+    for byte in raw.bytes() {
+        if byte.is_ascii_alphanumeric() || USERINFO_SAFE.contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
         }
     }
     out
+}
+
+/// Fim da autoridade (`host[:porta]`) no que vem depois de `://`: a
+/// primeira `/`, `?` ou `#` (RFC 3986). Só até aí um `@` separa credencial
+/// de host; depois dele o `@` já é parte do caminho.
+fn authority_end(rest: &str) -> usize {
+    rest.find(['/', '?', '#']).unwrap_or(rest.len())
 }
 
 /// Injeta a credencial na URL SOMENTE em runtime (a URL persistida nunca a
@@ -123,9 +129,19 @@ pub fn inject_credentials(url: &str, secret: Option<&str>) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();
     };
-    match rest.split_once('@') {
-        Some((user, host)) => {
-            format!("{scheme}://{user}:{}@{host}", percent_encode(secret))
+    // O `@` só é separador dentro da autoridade: em `rtsp://host/live@2`
+    // não há usuário nenhum, e tratá-lo como separador montaria uma URL
+    // sem sentido (`rtsp://host/live:senha@2`).
+    match rest[..authority_end(rest)].rfind('@') {
+        Some(at) => {
+            let (user, host) = (&rest[..at], &rest[at + 1..]);
+            // O usuário também é codificado: um espaço aqui quebra a URL
+            // no ffmpeg exatamente como um espaço na senha.
+            format!(
+                "{scheme}://{}:{}@{host}",
+                percent_encode(user),
+                percent_encode(secret)
+            )
         }
         None => {
             let encoded = match secret.split_once(':') {
@@ -180,7 +196,7 @@ impl RtspFailure {
             // que não existia; esta cobre as duas causas, na ordem em que
             // compensa investigar.
             RtspFailure::AuthFailed => {
-                "A câmera recusou o acesso (401). Confira o CAMINHO do stream na URL — \
+                "A câmera recusou o acesso (401/403). Confira o CAMINHO do stream na URL — \
                  muitos servidores respondem 401 quando ele falta (ex.: \
                  rtsp://host:8080/h264_ulaw.sdp em vez de rtsp://host:8080) — e, \
                  se a câmera tiver senha, o usuário e a senha."
@@ -195,10 +211,28 @@ impl RtspFailure {
     }
 }
 
+/// Procura um código de status solto no texto SEM casar com os endereços
+/// hexadecimais que o ffmpeg carimba em toda linha: `[rtsp @ 0x55d4403a]`
+/// contém "403", e a comparação por substring crua fazia QUALQUER erro
+/// virar "a câmera recusou o acesso" (achado na revisão da v0.1.0).
+fn has_status_code(lower: &str, code: &str) -> bool {
+    lower.match_indices(code).any(|(i, _)| {
+        let antes = lower[..i].chars().next_back();
+        let depois = lower[i + code.len()..].chars().next();
+        !antes.is_some_and(|c| c.is_ascii_alphanumeric())
+            && !depois.is_some_and(|c| c.is_ascii_alphanumeric())
+    })
+}
+
 /// Classifica o stderr acumulado de um ffmpeg que morreu.
 pub fn classify_ffmpeg_failure(stderr: &str) -> RtspFailure {
     let lower = stderr.to_lowercase();
-    if lower.contains("401") || lower.contains("unauthorized") || lower.contains("403") {
+    if has_status_code(&lower, "401")
+        || has_status_code(&lower, "403")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
+        || lower.contains("authorization failed")
+    {
         return RtspFailure::AuthFailed;
     }
     if lower.contains("connection refused")
@@ -223,6 +257,24 @@ pub fn classify_ffmpeg_failure(stderr: &str) -> RtspFailure {
 // Probe de URL (validação com timeout de 3 s)
 // ---------------------------------------------------------------------------
 
+/// Falha de um probe: o erro acionável e o stderr já censurado e cortado,
+/// para quem chama decidir o nível do log.
+struct ProbeFailure {
+    error: AppError,
+    stderr: String,
+}
+
+/// Últimas `n` linhas não vazias, numa linha só. O ffmpeg repete o mesmo
+/// erro em vários níveis e o começo do stderr é sempre o menos informativo.
+fn tail_lines(text: &str, n: usize) -> String {
+    let linhas: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    linhas[linhas.len().saturating_sub(n)..].join(" | ")
+}
+
 /// Valida que a URL responde, com timeout de 3 s (quickstart Cenário 4):
 /// decodifica 1 frame e sai. `url` já deve vir com credenciais injetadas.
 pub async fn probe_url(
@@ -230,9 +282,34 @@ pub async fn probe_url(
     url: &str,
     extra_env: &[(String, String)],
 ) -> Result<(), AppError> {
-    validate_rtsp_url(url.split_once('@').map_or(url, |_| url))?;
+    probe_once(ffmpeg, url, extra_env).await.map_err(|falha| {
+        if !falha.stderr.is_empty() {
+            tracing::debug!(stderr = %falha.stderr, "probe RTSP: stderr do ffmpeg");
+        }
+        falha.error
+    })
+}
 
-    let mut args = ffmpeg_input_args(url);
+/// Uma tentativa de probe. Devolve o stderr junto da falha em vez de
+/// logá-lo: só quem sabe se esta era a última tentativa sabe se isso é um
+/// problema do usuário ou o aquecimento normal de uma câmera.
+async fn probe_once(
+    ffmpeg: &std::path::Path,
+    url: &str,
+    extra_env: &[(String, String)],
+) -> Result<(), ProbeFailure> {
+    let sem_stderr = |error| ProbeFailure {
+        error,
+        stderr: String::new(),
+    };
+    validate_rtsp_url(url).map_err(sem_stderr)?;
+
+    // `-hide_banner`: sem ele 1,6 KB dos ~1,9 KB de stderr são a versão e a
+    // configuração de build do ffmpeg, que enterram no log a única linha
+    // que interessa (medido em bancada: 1937 → 256 bytes). O nível de log
+    // fica no padrão de propósito — é dele que sai o texto classificado.
+    let mut args = vec!["-hide_banner".to_string()];
+    args.extend(ffmpeg_input_args(url));
     args.extend([
         "-frames:v".into(),
         "1".into(),
@@ -249,48 +326,68 @@ pub async fn probe_url(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = crate::procutil::hide_console(cmd).spawn().map_err(|e| {
-        AppError::new(
-            "ffmpeg_ausente",
-            format!("Não consegui executar o ffmpeg: {e}"),
+        sem_stderr(
+            AppError::new(
+                "ffmpeg_ausente",
+                format!("Não consegui executar o ffmpeg: {e}"),
+            )
+            .with_hint("Instale o ffmpeg e garanta que está no PATH."),
         )
-        .with_hint("Instale o ffmpeg e garanta que está no PATH.")
     })?;
 
-    let mut stderr = child.stderr.take();
-    let wait = async {
-        let mut buf = String::new();
-        if let Some(err) = stderr.as_mut() {
-            let _ = err.read_to_string(&mut buf).await;
-        }
-        let status = child.wait().await;
-        (status, buf)
-    };
+    // O stderr é acumulado num buffer COMPARTILHADO, fora do future do
+    // timeout: lê-lo dentro dele fazia o texto ser cancelado junto quando o
+    // timeout vencia — e é justamente aí (câmera desligada, o caso mais
+    // comum) que o log não tinha nada além de `code=rtsp_timeout`.
+    let coletado = Arc::new(std::sync::Mutex::new(String::new()));
+    let leitor = child.stderr.take().map(|mut err| {
+        let destino = Arc::clone(&coletado);
+        tokio::spawn(async move {
+            let mut pedaco = [0u8; 2048];
+            loop {
+                match err.read(&mut pedaco).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut buf) = destino.lock() {
+                            buf.push_str(&String::from_utf8_lossy(&pedaco[..n]));
+                        }
+                    }
+                }
+            }
+        })
+    });
 
-    match tokio::time::timeout(PROBE_TIMEOUT, wait).await {
-        Err(_) => Err(
-            AppError::new("rtsp_timeout", "Fonte RTSP não respondeu em 3 s")
+    let esperou = tokio::time::timeout(PROBE_TIMEOUT, child.wait()).await;
+    if esperou.is_ok() {
+        // O processo saiu: dar um instante ao leitor para drenar o pipe,
+        // senão o stderr chega truncado justamente no fim, que é a parte
+        // que classifica a falha.
+        if let Some(task) = leitor {
+            let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
+        }
+    }
+    let stderr_text = coletado.lock().map(|buf| buf.clone()).unwrap_or_default();
+    let stderr = tail_lines(&redact_credentials(&stderr_text), 4);
+
+    match esperou {
+        Err(_) => Err(ProbeFailure {
+            error: AppError::new("rtsp_timeout", "Fonte RTSP não respondeu em 3 s")
                 .with_hint(RtspFailure::Unreachable.action_hint()),
-        ),
-        Ok((Ok(status), _)) if status.success() => Ok(()),
-        Ok((_, stderr_text)) => {
+            stderr,
+        }),
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(_) => {
             let failure = classify_ffmpeg_failure(&stderr_text);
-            // Sem isto o log dizia apenas `code=rtsp_auth` e não havia como
-            // descobrir a causa: o `AuthFailed` não carrega texto, de
-            // propósito. Em bancada (2026-10-14) uma URL sem o caminho do
-            // stream fez o IP Webcam responder 401, o usuário foi mandado
-            // procurar uma senha que não existia, e o log não ajudava.
-            // Logar ficou seguro com `redact_credentials` (T073).
-            tracing::warn!(
-                stderr = %redact_credentials(stderr_text.trim()),
-                "probe RTSP: stderr do ffmpeg"
-            );
             let code = match &failure {
                 RtspFailure::AuthFailed => "rtsp_auth",
                 RtspFailure::Unreachable => "rtsp_inacessivel",
                 RtspFailure::Other(_) => "rtsp_falha",
             };
-            Err(AppError::new(code, "Falha ao conectar na fonte RTSP")
-                .with_hint(failure.action_hint()))
+            Err(ProbeFailure {
+                error: AppError::new(code, "Falha ao conectar na fonte RTSP")
+                    .with_hint(failure.action_hint()),
+                stderr,
+            })
         }
     }
 }
@@ -318,25 +415,44 @@ pub async fn probe_url_with_retry(
     retry_delay: Duration,
 ) -> Result<(), AppError> {
     let mut last_err = None;
-    for attempt in 0..max_attempts.max(1) {
+    let tentativas = max_attempts.max(1);
+    for attempt in 0..tentativas {
         if attempt > 0 {
             tokio::time::sleep(retry_delay).await;
         }
         let started = std::time::Instant::now();
-        match probe_url(ffmpeg, url, extra_env).await {
+        match probe_once(ffmpeg, url, extra_env).await {
             Ok(()) => {
                 tracing::debug!(attempt = attempt + 1, elapsed = ?started.elapsed(), "probe RTSP ok");
                 return Ok(());
             }
-            Err(e) => {
-                tracing::warn!(
-                    attempt = attempt + 1,
-                    max_attempts,
-                    elapsed = ?started.elapsed(),
-                    code = %e.code,
-                    "probe RTSP falhou"
-                );
-                last_err = Some(e);
+            Err(falha) => {
+                // Só a tentativa que DESISTE vira WARN. Falhar nas
+                // primeiras é o comportamento esperado de uma câmera
+                // recém-ligada (é para isso que este laço existe), e
+                // alarmar nelas é o mesmo erro que o T099 corrigiu no
+                // pipeline Android: três cliques normais do usuário
+                // viraram três WARN e uma caçada a um defeito inexistente.
+                if attempt + 1 == tentativas {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts = tentativas,
+                        elapsed = ?started.elapsed(),
+                        code = %falha.error.code,
+                        stderr = %falha.stderr,
+                        "probe RTSP falhou"
+                    );
+                } else {
+                    tracing::debug!(
+                        attempt = attempt + 1,
+                        max_attempts = tentativas,
+                        elapsed = ?started.elapsed(),
+                        code = %falha.error.code,
+                        stderr = %falha.stderr,
+                        "probe RTSP falhou, vai repetir"
+                    );
+                }
+                last_err = Some(falha.error);
             }
         }
     }
@@ -408,20 +524,39 @@ pub fn start_session(
     let stop_flag = Arc::clone(&stop);
 
     let task = tokio::spawn(async move {
+        // Quantas quedas seguidas já houve. Uma fonte que cai de verdade
+        // (câmera sem energia) reconecta a cada RECONNECT_DELAY: logar o
+        // stderr inteiro em toda volta encheria o log do dia — a noite
+        // inteira daria ~86 mil linhas idênticas num arquivo que o T098
+        // guarda por 7 dias.
+        let mut seguidas: u32 = 0;
         while !stop_flag.load(Ordering::SeqCst) {
             match run_ffmpeg_once(&config, sink.as_ref()).await {
                 Ok(()) => {
-                    tracing::info!(url_host = %redact_url(&config.url), "sessão RTSP encerrada pelo ffmpeg");
+                    seguidas = 0;
+                    tracing::info!(url_host = %redact_credentials(&config.url), "sessão RTSP encerrada pelo ffmpeg");
                 }
-                Err(failure) => {
-                    tracing::warn!(
-                        url_host = %redact_url(&config.url),
-                        ?failure,
-                        "ffmpeg da sessão RTSP caiu"
-                    );
-                    if matches!(failure, RtspFailure::AuthFailed) {
+                Err(queda) => {
+                    seguidas += 1;
+                    if seguidas == 1 || seguidas.is_multiple_of(FAILURE_LOG_EVERY) {
+                        tracing::warn!(
+                            url_host = %redact_credentials(&config.url),
+                            failure = ?queda.failure,
+                            stderr = %queda.stderr,
+                            seguidas,
+                            "ffmpeg da sessão RTSP caiu"
+                        );
+                    } else {
+                        tracing::debug!(
+                            url_host = %redact_credentials(&config.url),
+                            failure = ?queda.failure,
+                            seguidas,
+                            "ffmpeg da sessão RTSP caiu de novo"
+                        );
+                    }
+                    if matches!(queda.failure, RtspFailure::AuthFailed) {
                         // Reconectar não resolve credencial errada.
-                        on_standby(&failure.action_hint());
+                        on_standby(&queda.failure.action_hint());
                         return;
                     }
                 }
@@ -437,28 +572,26 @@ pub fn start_session(
     RtspSession { stop, task }
 }
 
-/// Remove credenciais da URL para logging (`tracing` nunca vê a senha).
-fn redact_url(url: &str) -> String {
-    match (url.split_once("://"), url.split_once('@')) {
-        (Some((scheme, _)), Some((_, host))) => format!("{scheme}://***@{host}"),
-        _ => url.to_string(),
-    }
-}
-
-/// Censura credenciais embutidas em QUALQUER posição de um texto livre —
-/// diferente de `redact_url`, que espera a URL inteira e só ela.
+/// Censura credenciais embutidas em QUALQUER posição de um texto livre.
 ///
-/// Existe porque o ffmpeg ecoa a URL de entrada no stderr, e a última linha
-/// dele viaja dentro de `RtspFailure::Other`: dali ela ia para o log (via
-/// `?failure`) e para a interface (via `action_hint`). O campo vizinho já
-/// usava `redact_url`, mas isso não servia de nada com a URL crua no campo
-/// seguinte — auditoria de privacidade do T073 (2026-10-14). Com o log em
-/// arquivo do T098, a credencial passou a PERSISTIR em disco.
+/// Existe porque o ffmpeg ecoa a URL de entrada no stderr, e esse texto vai
+/// tanto para o log em arquivo (T098, que guarda 7 dias em disco) quanto
+/// para a interface, via `RtspFailure::Other`/`action_hint`.
 ///
-/// `user:senha` só pode aparecer antes da primeira `/` do caminho, então é
-/// esse trecho que é substituído. Espaço NÃO encerra a autoridade: uma
-/// senha com espaço digitada direto na URL escaparia da censura. Na
-/// dúvida, censurar a mais (até a quebra de linha) é o lado seguro.
+/// As duas versões anteriores escolheram um caractere para terminar a
+/// autoridade e erraram em lados opostos: com `/`, uma senha contendo `/`
+/// deixava o `@` fora da janela e passava inteira (`rtsp://cam:a/b@host`);
+/// sem limite nenhum, a etiqueta `[rtsp @ 0x55...]` que o ffmpeg carimba
+/// em toda linha virava "credencial" e apagava a mensagem de erro junto.
+/// A regra aqui olha para as duas:
+///
+/// - a janela de uma autoridade acaba na quebra de linha ou no começo da
+///   PRÓXIMA URL — daí em diante o texto não é mais dela;
+/// - dentro dela vale o ÚLTIMO `@`, menos quando ele está cercado de
+///   espaço dos dois lados, que é a etiqueta do ffmpeg e nunca uma URL.
+///
+/// Quando a dúvida sobra (um `@` no caminho, por exemplo), censura a mais:
+/// perder diagnóstico se recupera pedindo o log de novo; vazar senha não.
 pub fn redact_credentials(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -466,8 +599,13 @@ pub fn redact_credentials(text: &str) -> String {
         let after = pos + "://".len();
         out.push_str(&rest[..after]);
         rest = &rest[after..];
-        let authority_end = rest.find(['/', '\n', '\r']).unwrap_or(rest.len());
-        if let Some(at) = rest[..authority_end].find('@') {
+        let janela = rest
+            .find(['\n', '\r'])
+            .into_iter()
+            .chain(rest.find("://"))
+            .min()
+            .unwrap_or(rest.len());
+        if let Some(at) = last_userinfo_at(&rest[..janela]) {
             out.push_str("***@");
             rest = &rest[at + 1..];
         }
@@ -476,12 +614,40 @@ pub fn redact_credentials(text: &str) -> String {
     out
 }
 
+/// Último `@` da janela que ainda pode separar credencial de host.
+fn last_userinfo_at(janela: &str) -> Option<usize> {
+    janela
+        .char_indices()
+        .filter(|(i, ch)| {
+            *ch == '@' && {
+                let antes = janela[..*i].chars().next_back();
+                let depois = janela[i + 1..].chars().next();
+                !(antes.is_some_and(|c| c.is_whitespace())
+                    && depois.is_some_and(|c| c.is_whitespace()))
+            }
+        })
+        .map(|(i, _)| i)
+        .next_back()
+}
+
+/// A cada quantas quedas CONSECUTIVAS o log volta a gritar. Com
+/// `RECONNECT_DELAY` de 2 s, 300 é uma linha a cada 10 min: a fonte
+/// continua visível no log sem afogá-lo.
+const FAILURE_LOG_EVERY: u32 = 300;
+
+/// Falha de uma execução da sessão: a classificação e o stderr censurado,
+/// que o supervisor loga só na PRIMEIRA de uma sequência.
+struct RunFailure {
+    failure: RtspFailure,
+    stderr: String,
+}
+
 /// Uma execução do ffmpeg: retorna `Ok` em EOF limpo (fonte encerrou) ou a
 /// falha classificada do stderr.
 async fn run_ffmpeg_once(
     config: &RtspSessionConfig,
     sink: Option<&FrameSink>,
-) -> Result<(), RtspFailure> {
+) -> Result<(), RunFailure> {
     let args = session_args(config);
     let mut cmd = Command::new(&config.ffmpeg);
     cmd.args(&args)
@@ -495,7 +661,10 @@ async fn run_ffmpeg_once(
         .kill_on_drop(true);
     let mut child = crate::procutil::hide_console(cmd)
         .spawn()
-        .map_err(|e| RtspFailure::Other(format!("spawn do ffmpeg falhou: {e}")))?;
+        .map_err(|e| RunFailure {
+            failure: RtspFailure::Other(format!("spawn do ffmpeg falhou: {e}")),
+            stderr: String::new(),
+        })?;
 
     // Acumula o stderr em paralelo para classificar a falha no fim.
     let stderr_task = child.stderr.take().map(|mut err| {
@@ -523,10 +692,10 @@ async fn run_ffmpeg_once(
         }
     }
 
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| RtspFailure::Other(format!("wait do ffmpeg falhou: {e}")))?;
+    let status = child.wait().await.map_err(|e| RunFailure {
+        failure: RtspFailure::Other(format!("wait do ffmpeg falhou: {e}")),
+        stderr: String::new(),
+    })?;
     let stderr_text = match stderr_task {
         Some(task) => task.await.unwrap_or_default(),
         None => String::new(),
@@ -534,11 +703,13 @@ async fn run_ffmpeg_once(
     if status.success() {
         Ok(())
     } else {
-        // Mesmo motivo do probe: a classificação sozinha não diz a causa.
-        tracing::warn!(
-            stderr = %redact_credentials(stderr_text.trim()),
-            "sessão RTSP: stderr do ffmpeg"
-        );
-        Err(classify_ffmpeg_failure(&stderr_text))
+        // O stderr sobe junto com a classificação em vez de virar uma
+        // linha de log aqui: a classificação sozinha não diz a causa, mas
+        // quem decide se vale gritar é o supervisor, que sabe se esta é a
+        // primeira queda ou a milésima da mesma sequência.
+        Err(RunFailure {
+            failure: classify_ffmpeg_failure(&stderr_text),
+            stderr: tail_lines(&redact_credentials(stderr_text.trim()), 4),
+        })
     }
 }

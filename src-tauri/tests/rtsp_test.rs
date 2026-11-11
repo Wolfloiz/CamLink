@@ -337,7 +337,7 @@ fn auth_e_inacessivel_continuam_sem_texto_livre() {
 }
 
 // ---------------------------------------------------------------------------
-// T073 — o 401 não é só "senha errada"
+// T101 — o 401 não é só "senha errada"
 //
 // Em bancada (2026-10-14) `rtsp://192.168.1.4:8080` sem o caminho do stream
 // fez o IP Webcam responder `method OPTIONS failed: 401`, embora o app não
@@ -358,5 +358,102 @@ fn dica_de_401_menciona_o_caminho_do_stream() {
     assert!(
         hint.to_lowercase().contains("senha"),
         "e sem deixar de citar a credencial, que é a outra causa: {hint}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T102 — achados da revisão da v0.1.0 (2026-11-11)
+//
+// A censura de credenciais já tinha sido corrigida duas vezes, e as duas
+// correções tinham o mesmo formato: escolher um caractere como fim da
+// autoridade e descobrir depois um caso em que ele cai do lado errado.
+// Aqui ficam os dois lados do erro, para que a próxima mudança tenha que
+// passar pelos dois ao mesmo tempo.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn senha_com_barra_nao_vaza_na_redacao() {
+    // Medido com ffmpeg real: `rtsp://cam:a/b@host/stream` faz ele ecoar
+    // `Error opening input file rtsp://cam:a/b@127.0.0.1:18554/.` — com a
+    // senha inteira. Terminar a autoridade na primeira `/` deixava o `@`
+    // fora da janela, então nada era censurado.
+    let texto = "Error opening input file rtsp://cam:a/b@192.168.1.9:554/stream.";
+    let censurado = redact_credentials(texto);
+    assert!(!censurado.contains("a/b"), "vazou a senha: {censurado}");
+    assert_eq!(
+        censurado,
+        "Error opening input file rtsp://***@192.168.1.9:554/stream."
+    );
+}
+
+#[test]
+fn etiqueta_do_ffmpeg_nao_e_confundida_com_credencial() {
+    // O outro lado: toda linha do ffmpeg carrega `[rtsp @ 0x...]`. Tratar
+    // aquele `@` como separador de credencial apagava o host E a mensagem
+    // de erro — justamente o que a linha existe para mostrar.
+    let texto = "rtsp://192.168.1.4:8080 recusou [rtsp @ 0x7f12] 401";
+    assert_eq!(redact_credentials(texto), texto);
+}
+
+#[test]
+fn endereco_hexadecimal_nao_vira_401() {
+    // `0x55d4403a` contém "403": a classificação por substring crua dizia
+    // "a câmera recusou o acesso" para qualquer erro cujo endereço de
+    // contexto tivesse esse pedaço.
+    let falha =
+        classify_ffmpeg_failure("[rtsp @ 0x55d4403a] Invalid data found when processing input");
+    assert!(
+        matches!(falha, RtspFailure::Other(_)),
+        "endereço hexadecimal não é código de status: {falha:?}"
+    );
+
+    // E o código de verdade continua sendo reconhecido.
+    assert_eq!(
+        classify_ffmpeg_failure("method DESCRIBE failed: 401 Unauthorized"),
+        RtspFailure::AuthFailed
+    );
+    assert_eq!(
+        classify_ffmpeg_failure("[rtsp @ 0x1] method DESCRIBE failed: 403 Forbidden"),
+        RtspFailure::AuthFailed
+    );
+}
+
+#[test]
+fn dica_de_auth_nao_promete_um_codigo_que_o_servidor_nao_mandou() {
+    // 403 também classifica como AuthFailed; a dica não pode afirmar 401.
+    let hint = RtspFailure::AuthFailed.action_hint();
+    assert!(
+        hint.contains("403"),
+        "um 403 cai nesta mesma dica — ela não pode dizer só 401: {hint}"
+    );
+}
+
+#[test]
+fn senha_nao_ascii_e_codificada() {
+    // Enumerar os caracteres perigosos sempre deixava um de fora: acento e
+    // espaço não separável (trivial num copiar-e-colar) iam crus para a URL
+    // e o ffmpeg respondia "Invalid argument" sem acusar a senha.
+    assert_eq!(
+        inject_credentials("rtsp://cam@192.168.1.9/s", Some("açã\u{a0}o")),
+        "rtsp://cam:a%C3%A7%C3%A3%C2%A0o@192.168.1.9/s"
+    );
+}
+
+#[test]
+fn usuario_que_ja_estava_na_url_tambem_e_codificado() {
+    // A metade de cima da credencial passava crua: o espaço aqui quebra a
+    // URL no ffmpeg exatamente como o da senha.
+    assert_eq!(
+        inject_credentials("rtsp://meu usuario@192.168.1.9/s", Some("x")),
+        "rtsp://meu%20usuario:x@192.168.1.9/s"
+    );
+}
+
+#[test]
+fn arroba_no_caminho_nao_e_separador_de_credencial() {
+    // `rtsp://host/live@2` não tem usuário nenhum: o `@` está no caminho.
+    assert_eq!(
+        inject_credentials("rtsp://192.168.1.9/live@2", Some("s3nh4")),
+        "rtsp://s3nh4@192.168.1.9/live@2"
     );
 }
