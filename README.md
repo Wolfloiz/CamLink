@@ -57,14 +57,18 @@ pacote, na versão exata que o CamLink precisa — você não instala nem
 atualiza nada por fora. Veja [por que embutido](#por-que-o-scrcpy-vai-embutido).
 
 **Arch / Manjaro / EndeavourOS** — o pacote **ainda não está no AUR**, então
-`yay -S camlink` não encontra nada. Use o `PKGBUILD` do repositório, que baixa
-os fontes da tag publicada:
+`yay -S camlink` não encontra nada. O caminho pronto aqui é o **AppImage**,
+logo abaixo.
 
-```bash
-cd installer/linux && makepkg -si
-```
-
-Ou use o AppImage.
+Dá para construir a partir do `PKGBUILD` do repositório (`cd installer/linux
+&& makepkg -si`), mas sabendo o que ele é: a *fonte* do pacote do AUR, e duas
+das suas três entradas estão com `sha256sums=SKIP` — o tarball da tag e o
+`scrcpy-server`, que é justamente o binário empurrado para o celular e
+executado lá. Não é descuido: o hash do tarball não pode viver dentro da
+própria tag que ele resume, e o do jar só existe depois que a release é
+publicada; os dois são preenchidos no repositório do AUR, que é separado.
+Até o pacote do AUR sair, construir por aqui confia no HTTPS do GitHub e em
+mais nada.
 
 **AppImage** — baixe o `.AppImage` e o `install-appimage.sh` da mesma
 release, e rode:

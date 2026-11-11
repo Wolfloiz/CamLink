@@ -66,3 +66,5 @@ Meet/Chrome; alguns aparelhos Samsung podem entrar em ciclo de reconexão por
 um bug conhecido do próprio scrcpy; e o preview interno pode piscar com
 fontes Android no Linux quando há um consumidor ativo (não afeta a imagem
 entregue ao OBS).
+
+[0.1.0]: https://github.com/Wolfloiz/CamLink/releases/tag/v0.1.0
